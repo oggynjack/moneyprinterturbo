@@ -1421,14 +1421,6 @@ def azure_tts_v2(text: str, voice_name: str, voice_file: str) -> Union[SubMaker,
             sub_maker = ensure_legacy_submaker_fields(SubMaker())
 
             def speech_synthesizer_word_boundary_cb(evt: speechsdk.SessionEventArgs):
-                # print('WordBoundary event:')
-                # print('\tBoundaryType: {}'.format(evt.boundary_type))
-                # print('\tAudioOffset: {}ms'.format((evt.audio_offset + 5000)))
-                # print('\tDuration: {}'.format(evt.duration))
-                # print('\tText: {}'.format(evt.text))
-                # print('\tTextOffset: {}'.format(evt.text_offset))
-                # print('\tWordLength: {}'.format(evt.word_length))
-
                 duration = _format_duration_to_offset(str(evt.duration))
                 offset = _format_duration_to_offset(evt.audio_offset)
                 sub_maker.subs.append(evt.text)
@@ -1448,8 +1440,6 @@ def azure_tts_v2(text: str, voice_name: str, voice_file: str) -> Union[SubMaker,
                 subscription=speech_key, region=service_region
             )
             speech_config.speech_synthesis_voice_name = voice_name
-            # speech_config.set_property(property_id=speechsdk.PropertyId.SpeechServiceResponse_RequestSentenceBoundary,
-            #                            value='true')
             speech_config.set_property(
                 property_id=speechsdk.PropertyId.SpeechServiceResponse_RequestWordBoundary,
                 value="true",
@@ -1592,11 +1582,11 @@ def gemini_tts(
         # 将音频长度转换为100纳秒单位（与edge_tts兼容）
         audio_duration_100ns = int(audio_duration * 10000000)
         
-        # 使用create_sub方法正确创建字幕项
-        sub_maker.create_sub(
-            (0, audio_duration_100ns), 
-            text
-        )
+        # Fix: directly append to legacy subs/offset fields.
+        # SubMaker.create_sub() was removed in edge_tts 7.x; using the
+        # ensure_legacy_submaker_fields()-initialized arrays instead.
+        sub_maker.subs.append(text)
+        sub_maker.offset.append((0, audio_duration_100ns))
         
         return sub_maker
         
@@ -1641,7 +1631,7 @@ def _match_script_line(script_lines: list[str], current_text: str, sub_index: in
     """
     尝试把当前累计的字幕文本，与脚本中的某一条标准断句匹配起来。
 
-    这里复用了项目原有的“按标点拆脚本，再逐段比对”的思路：
+    这里复用了项目原有的"按标点拆脚本，再逐段比对"的思路：
     1. 优先精确匹配；
     2. 再做一次去常规标点后的匹配；
     3. 最后做一次更激进的非单词字符清洗匹配。
@@ -1705,7 +1695,7 @@ def _build_subtitle_items_from_edge_cues(
     背景：
     edge_tts 7.x 的 `SubMaker.get_srt()` 更偏向逐词/逐短语的时间轴。
     对英文做逐词高亮尚可，但中文短视频字幕如果直接照搬，会出现
-    “金钱 / 是 / 一种 / 社会 / 工具” 这种阅读体验很差的效果。
+    "金钱 / 是 / 一种 / 社会 / 工具" 这种阅读体验很差的效果。
 
     实现策略：
     1. 逐个消费 cues 中的 `content`；
@@ -1892,7 +1882,7 @@ if __name__ == "__main__":
             "zh-CN-YunxiNeural",
         ]
         text = """
-        静夜思是唐代诗人李白创作的一首五言古诗。这首诗描绘了诗人在寂静的夜晚，看到窗前的明月，不禁想起远方的家乡和亲人，表达了他对家乡和亲人的深深思念之情。全诗内容是：“床前明月光，疑是地上霜。举头望明月，低头思故乡。”在这短短的四句诗中，诗人通过“明月”和“思故乡”的意象，巧妙地表达了离乡背井人的孤独与哀愁。首句“床前明月光”设景立意，通过明亮的月光引出诗人的遐想；“疑是地上霜”增添了夜晚的寒冷感，加深了诗人的孤寂之情；“举头望明月”和“低头思故乡”则是情感的升华，展现了诗人内心深处的乡愁和对家的渴望。这首诗简洁明快，情感真挚，是中国古典诗歌中非常著名的一首，也深受后人喜爱和推崇。
+        静夜思是唐代诗人李白创作的一首五言古诗。这首诗描绘了诗人在寂静的夜晚，看到窗前的明月，不禁想起远方的家乡和亲人，表达了他对家乡和亲人的深深思念之情。全诗内容是："床前明月光，疑是地上霜。举头望明月，低头思故乡。"在这短短的四句诗中，诗人通过"明月"和"思故乡"的意象，巧妙地表达了离乡背井人的孤独与哀愁。首句"床前明月光"设景立意，通过明亮的月光引出诗人的遐想；"疑是地上霜"增添了夜晚的寒冷感，加深了诗人的孤寂之情；"举头望明月"和"低头思故乡"则是情感的升华，展现了诗人内心深处的乡愁和对家的渴望。这首诗简洁明快，情感真挚，是中国古典诗歌中非常著名的一首，也深受后人喜爱和推崇。
             """
 
         text = """
