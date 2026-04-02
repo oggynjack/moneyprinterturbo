@@ -4,7 +4,7 @@
 
 ## 为什么要 GPU 加速
 
-MoneyPrinterTurbo 中唯一的深度学习环节是 **faster-whisper 语音识别**（将音频转为带时间戳的字幕）。
+moneyprinterturbo 中唯一的深度学习环节是 **faster-whisper 语音识别**（将音频转为带时间戳的字幕）。
 
 - **CPU 模式**（默认）：`large-v3` 模型生成字幕较慢
 - **GPU 模式**：利用 NVIDIA GPU + CUDA 加速，速度提升 **5-10 倍**

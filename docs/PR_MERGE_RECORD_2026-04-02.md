@@ -79,23 +79,23 @@
 - 任务号：`8b2a0e6e-b3e6-44ab-a1b4-1865a0b4788d`
 - 提交方式：
   - `POST /api/v1/videos`
-  - 使用本地素材 `/Users/harry/Projects/Python/MoneyPrinterTurbo/test/resources/1.png`
+  - 使用本地素材 `/Users/harry/Projects/Python/moneyprinterturbo/test/resources/1.png`
   - 显式指定 `video_transition_mode="FadeIn"`
 - 结果：成功
 - 任务状态：`state=1, progress=100`
 
 ### 第二次任务产物
 
-- 音频：`/Users/harry/Projects/Python/MoneyPrinterTurbo/storage/tasks/8b2a0e6e-b3e6-44ab-a1b4-1865a0b4788d/audio.mp3`
+- 音频：`/Users/harry/Projects/Python/moneyprinterturbo/storage/tasks/8b2a0e6e-b3e6-44ab-a1b4-1865a0b4788d/audio.mp3`
   - 时长：`8.952s`
   - 大小：`53712 bytes`
-- 拼接视频：`/Users/harry/Projects/Python/MoneyPrinterTurbo/storage/tasks/8b2a0e6e-b3e6-44ab-a1b4-1865a0b4788d/combined-1.mp4`
+- 拼接视频：`/Users/harry/Projects/Python/moneyprinterturbo/storage/tasks/8b2a0e6e-b3e6-44ab-a1b4-1865a0b4788d/combined-1.mp4`
   - 时长：`9.000s`
   - 大小：`177666 bytes`
-- 成片：`/Users/harry/Projects/Python/MoneyPrinterTurbo/storage/tasks/8b2a0e6e-b3e6-44ab-a1b4-1865a0b4788d/final-1.mp4`
+- 成片：`/Users/harry/Projects/Python/moneyprinterturbo/storage/tasks/8b2a0e6e-b3e6-44ab-a1b4-1865a0b4788d/final-1.mp4`
   - 时长：`9.000s`
   - 大小：`352810 bytes`
-- 字幕：`/Users/harry/Projects/Python/MoneyPrinterTurbo/storage/tasks/8b2a0e6e-b3e6-44ab-a1b4-1865a0b4788d/subtitle.srt`
+- 字幕：`/Users/harry/Projects/Python/moneyprinterturbo/storage/tasks/8b2a0e6e-b3e6-44ab-a1b4-1865a0b4788d/subtitle.srt`
 
 ### 第二次任务字幕样本
 

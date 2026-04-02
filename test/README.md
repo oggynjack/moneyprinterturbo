@@ -1,6 +1,6 @@
-# MoneyPrinterTurbo Test Directory
+# moneyprinterturbo Test Directory
 
-This directory contains unit tests for the **MoneyPrinterTurbo** project.
+This directory contains unit tests for the **moneyprinterturbo** project.
 
 ## Directory Structure
 
