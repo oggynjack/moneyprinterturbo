@@ -100,10 +100,12 @@ class VideoParams(BaseModel):
     font_name: Optional[str] = "STHeitiMedium.ttc"
     text_fore_color: Optional[str] = "#FFFFFF"
     text_background_color: Union[bool, str] = True
+    subtitle_bg_color: Optional[tuple] = None  # RGBA tuple e.g. (0,0,0,128); None = use default/transparent
 
     font_size: int = 60
     stroke_color: Optional[str] = "#000000"
     stroke_width: float = 1.5
+    voice_naturalness: Optional[float] = 1.0  # 0.0 = robotic, 1.0 = natural, 2.0 = very expressive
     n_threads: Optional[int] = 2
     paragraph_number: Optional[int] = 1
 

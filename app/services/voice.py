@@ -1,4 +1,5 @@
 import asyncio
+import concurrent.futures
 import math
 import os
 import re
@@ -15,6 +16,41 @@ from moviepy.audio.io.AudioFileClip import AudioFileClip
 
 from app.config import config
 from app.utils import utils
+
+_GEMINI_SUPPORTED_VOICES = [
+    "achernar",
+    "achird",
+    "algenib",
+    "algieba",
+    "alnilam",
+    "aoede",
+    "autonoe",
+    "callirrhoe",
+    "charon",
+    "despina",
+    "enceladus",
+    "erinome",
+    "fenrir",
+    "gacrux",
+    "iapetus",
+    "kore",
+    "laomedeia",
+    "leda",
+    "orus",
+    "puck",
+    "pulcherrima",
+    "rasalgethi",
+    "sadachbia",
+    "sadaltager",
+    "schedar",
+    "sulafat",
+    "umbriel",
+    "vindemiatrix",
+    "zephyr",
+    "zubenelgenubi",
+]
+_GEMINI_SUPPORTED_VOICE_SET = set(_GEMINI_SUPPORTED_VOICES)
+_GEMINI_DEFAULT_VOICE = "zephyr"
 
 
 def mktimestamp(time_unit: float) -> str:
@@ -62,32 +98,10 @@ def get_gemini_voices() -> list[str]:
     获取Gemini TTS的声音列表
     
     Returns:
-        声音列表，格式为 ["gemini:Zephyr-Female", "gemini:Puck-Male", ...]
+        声音列表，格式为 ["gemini:zephyr-Neutral", "gemini:puck-Neutral", ...]
     """
-    # Gemini TTS支持的语音列表
-    voices_with_gender = [
-        ("Zephyr", "Female"),
-        ("Puck", "Male"), 
-        ("Charon", "Male"),
-        ("Kore", "Female"),
-        ("Fenrir", "Male"),
-        ("Aoede", "Female"),
-        ("Thalia", "Female"),
-        ("Sage", "Male"),
-        ("Echo", "Female"),
-        ("Harmony", "Female"),
-        ("Lux", "Female"),
-        ("Nova", "Female"),
-        ("Vale", "Male"),
-        ("Orion", "Male"),
-        ("Atlas", "Male"),
-    ]
-    
-    # 添加gemini:前缀，并格式化为显示名称
-    return [
-        f"gemini:{voice}-{gender}"
-        for voice, gender in voices_with_gender
-    ]
+    # 仅返回当前 Gemini API 已支持且可用的语音，避免 UI 选项里出现过时语音。
+    return [f"gemini:{voice}-Neutral" for voice in _GEMINI_SUPPORTED_VOICES]
 
 
 def get_all_azure_voices(filter_locals=None) -> list[str]:
@@ -659,6 +673,12 @@ Gender: Male
 Name: hi-IN-SwaraNeural
 Gender: Female
 
+Name: pa-IN-GurdeepNeural
+Gender: Male
+
+Name: pa-IN-VaaniNeural
+Gender: Female
+
 Name: hr-HR-GabrijelaNeural
 Gender: Female
 
@@ -1161,9 +1181,14 @@ def tts(
         # 格式: gemini:voice-Gender
         parts = voice_name.split(":")
         if len(parts) >= 2:
-            # 移除性别后缀，例如 "Zephyr-Female" -> "Zephyr"
+            # 移除后缀，例如 "zephyr-Neutral" -> "zephyr"
             voice_with_gender = parts[1]
-            voice = voice_with_gender.split("-")[0]
+            voice = voice_with_gender.split("-")[0].strip().lower()
+            if voice not in _GEMINI_SUPPORTED_VOICE_SET:
+                logger.warning(
+                    f"unsupported Gemini voice '{voice}', fallback to '{_GEMINI_DEFAULT_VOICE}'"
+                )
+                voice = _GEMINI_DEFAULT_VOICE
             return gemini_tts(text, voice, voice_rate, voice_file, voice_volume)
         else:
             logger.error(f"Invalid gemini voice name format: {voice_name}")
@@ -1214,31 +1239,162 @@ def azure_tts_v1(
 ) -> Union[SubMaker, None]:
     voice_name = parse_voice_name(voice_name)
     text = text.strip()
+    # Strip emoji and other non-speakable Unicode symbols.
+    # When edge-TTS encounters an emoji with an Indic voice it stalls the
+    # stream indefinitely instead of skipping the character.
+    text = re.sub(r'[\U00010000-\U0010FFFF]', '', text, flags=re.UNICODE).strip()
+    # Also remove common pictographic/symbol emoji in the BMP range
+    text = re.sub(
+        r'[\U0001F300-\U0001F9FF\U00002702-\U000027B0\U0000FE0F\U00002500-\U00002BEF\u200d]+',
+        '', text
+    ).strip()
     rate_str = convert_rate_to_percent(voice_rate)
-    for i in range(3):
-        try:
-            logger.info(f"start, voice name: {voice_name}, try: {i + 1}")
 
-            # edge_tts 7.x 已经提供同步流接口和新的字幕聚合器实现，
-            # 这里直接使用同步接口，避免继续依赖旧版本的异步流事件结构。
-            ensure_file_path_exists(voice_file)
+    # Split very long texts into chunks to avoid edge-TTS timeouts
+    # Each chunk is sent independently and the audio + cues are merged
+    MAX_CHUNK_CHARS = 400
+    TTS_TIMEOUT = 45  # seconds per attempt
+
+    def _preflight_can_stream(sample_text: str, timeout_s: int = 8) -> bool:
+        """Try to get the first stream event quickly to detect endpoint stalls."""
+
+        def _probe() -> bool:
             communicate = edge_tts.Communicate(
-                text,
+                sample_text,
                 voice_name,
                 rate=rate_str,
                 boundary="WordBoundary",
             )
-            sub_maker = edge_tts.SubMaker()
+            for _ in communicate.stream_sync():
+                return True
+            return False
 
-            with open(voice_file, "wb") as file:
-                for chunk in communicate.stream_sync():
-                    chunk_type = chunk["type"]
-                    if chunk_type == "audio":
-                        file.write(chunk["data"])
-                    elif chunk_type in ["WordBoundary", "SentenceBoundary"]:
-                        # 直接把 7.x 返回的边界事件喂给新的 SubMaker，
-                        # 这样后续可以复用官方生成的字幕与时间轴。
-                        sub_maker.feed(chunk)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_probe)
+            try:
+                return bool(future.result(timeout=timeout_s))
+            except concurrent.futures.TimeoutError:
+                return False
+            except Exception:
+                return False
+
+    # edge service currently stalls for some Punjabi/Gurmukhi payloads.
+    # Detect this early to avoid waiting through all retry timeouts.
+    if re.search(r"[\u0A00-\u0A7F]", text):
+        sample = text[:40] if text else "ਸਤ ਸ੍ਰੀ ਅਕਾਲ"
+        if not _preflight_can_stream(sample):
+            logger.error(
+                "edge-TTS endpoint did not return stream data for Punjabi/Gurmukhi text. "
+                "Please use another TTS provider or custom audio for Punjabi."
+            )
+            return None
+
+    def _split_text_into_chunks(t: str, max_len: int) -> list:
+        """Split at sentence boundaries (comma/period/newline) respecting max_len."""
+        import re
+        raw_parts = re.split(r'(?<=[,।.!?\n])', t)
+        chunks = []
+        current = ""
+        for part in raw_parts:
+            if len(current) + len(part) <= max_len:
+                current += part
+            else:
+                if current.strip():
+                    chunks.append(current.strip())
+                current = part
+        if current.strip():
+            chunks.append(current.strip())
+        return chunks or [t]
+
+    chunks = _split_text_into_chunks(text, MAX_CHUNK_CHARS)
+    if len(chunks) > 1:
+        logger.info(f"Long text ({len(text)} chars) split into {len(chunks)} TTS chunks")
+
+    # For single-chunk texts, use the original file directly.
+    # For multi-chunk, write temp files then concatenate.
+    import tempfile, wave, os as _os
+
+    def _tts_chunk(chunk_text: str, out_file: str) -> SubMaker:
+        ensure_file_path_exists(out_file)
+        communicate = edge_tts.Communicate(
+            chunk_text,
+            voice_name,
+            rate=rate_str,
+            boundary="WordBoundary",
+        )
+        sm = edge_tts.SubMaker()
+        with open(out_file, "wb") as f:
+            for chunk in communicate.stream_sync():
+                if chunk["type"] == "audio":
+                    f.write(chunk["data"])
+                elif chunk["type"] in ["WordBoundary", "SentenceBoundary"]:
+                    sm.feed(chunk)
+        return sm
+
+    for attempt in range(3):
+        try:
+            logger.info(f"start, voice name: {voice_name}, try: {attempt + 1}, chunks: {len(chunks)}")
+
+            if len(chunks) == 1:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(_tts_chunk, chunks[0], voice_file)
+                    try:
+                        sub_maker = future.result(timeout=TTS_TIMEOUT)
+                    except concurrent.futures.TimeoutError:
+                        logger.warning(f"timed out after {TTS_TIMEOUT}s waiting for edge-TTS, retrying...")
+                        continue
+            else:
+                # Multi-chunk: generate each chunk separately then concatenate audio
+                tmp_dir = tempfile.mkdtemp()
+                chunk_files = []
+                merged_sm = edge_tts.SubMaker()
+                time_offset_ms = 0
+
+                for idx, chunk_text in enumerate(chunks):
+                    chunk_file = _os.path.join(tmp_dir, f"chunk_{idx}.mp3")
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                        future = executor.submit(_tts_chunk, chunk_text, chunk_file)
+                        try:
+                            sm_part = future.result(timeout=TTS_TIMEOUT)
+                        except concurrent.futures.TimeoutError:
+                            logger.warning(f"chunk {idx} timed out, retrying whole attempt")
+                            sm_part = None
+                            break
+
+                    if sm_part is None:
+                        break
+
+                    chunk_files.append(chunk_file)
+                    # Shift cue offsets by accumulated duration and merge
+                    for cue in (sm_part.cues if hasattr(sm_part, 'cues') else []):
+                        try:
+                            shifted = type(cue)(start=cue.start + time_offset_ms * 10000,
+                                               end=cue.end + time_offset_ms * 10000,
+                                               text=cue.text)
+                            merged_sm.cues.append(shifted)
+                        except Exception:
+                            pass  # cue merging is best-effort
+
+                    # Estimate duration from file size (rough: 128kbps mp3)
+                    try:
+                        chunk_dur_ms = int(_os.path.getsize(chunk_file) / 16)
+                    except Exception:
+                        chunk_dur_ms = 3000
+                    time_offset_ms += chunk_dur_ms
+
+                if len(chunk_files) != len(chunks):
+                    continue  # Some chunk failed — retry
+
+                # Concatenate all mp3 chunk files into voice_file
+                ensure_file_path_exists(voice_file)
+                with open(voice_file, "wb") as out_f:
+                    for cf in chunk_files:
+                        with open(cf, "rb") as in_f:
+                            out_f.write(in_f.read())
+                # Clean temp
+                import shutil
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+                sub_maker = merged_sm
 
             if not sub_maker.get_srt():
                 logger.warning("failed, sub_maker.get_srt() is empty")
@@ -1495,10 +1651,17 @@ def gemini_tts(
         SubMaker对象或None
     """
     import base64
-    import json
-    import io
-    from pydub import AudioSegment
+    import subprocess
+    import tempfile
+    import wave
     import google.generativeai as genai
+
+    voice_name = (voice_name or "").strip().lower()
+    if voice_name not in _GEMINI_SUPPORTED_VOICE_SET:
+        logger.warning(
+            f"unsupported Gemini voice '{voice_name}', fallback to '{_GEMINI_DEFAULT_VOICE}'"
+        )
+        voice_name = _GEMINI_DEFAULT_VOICE
     
     try:
         # 配置Gemini API
@@ -1537,9 +1700,11 @@ def gemini_tts(
             
         # 获取音频数据
         audio_data = None
+        audio_mime_type = ""
         for part in response.candidates[0].content.parts:
             if hasattr(part, 'inline_data') and part.inline_data:
                 audio_data = part.inline_data.data
+                audio_mime_type = getattr(part.inline_data, "mime_type", "") or ""
                 break
                 
         if not audio_data:
@@ -1553,31 +1718,106 @@ def gemini_tts(
         else:
             # 如果已经是字节，直接使用
             audio_bytes = audio_data
-        
-        # 尝试不同的音频格式 - Gemini可能返回不同的格式
-        audio_segment = None
-        
-        # Gemini返回Linear PCM格式，按照文档参数解析
+
+        # Gemini TTS 通常返回 Linear PCM。这里不依赖 pydub，
+        # 先写 WAV 再用 ffmpeg 转 MP3，避免 Python 3.13 下 pyaudioop 问题。
+        ensure_file_path_exists(voice_file)
+
+        sample_rate = 24000
+        channels = 1
+        sample_width = 2
+        mime_lower = audio_mime_type.lower()
+
+        rate_match = re.search(r"rate=(\d+)", mime_lower)
+        if rate_match:
+            sample_rate = int(rate_match.group(1))
+
+        channel_match = re.search(r"channels=(\d+)", mime_lower)
+        if channel_match:
+            channels = int(channel_match.group(1))
+
+        tmp_wav = None
+        audio_duration = 0.0
+
         try:
-            audio_segment = AudioSegment.from_file(
-                io.BytesIO(audio_bytes), 
-                format="raw",
-                frame_rate=24000,  # Gemini TTS默认采样率
-                channels=1,        # 单声道
-                sample_width=2     # 16-bit
+            if isinstance(audio_bytes, bytearray):
+                audio_bytes = bytes(audio_bytes)
+
+            # 已经是 WAV 数据
+            if isinstance(audio_bytes, (bytes, bytearray)) and bytes(audio_bytes).startswith(b"RIFF"):
+                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_file:
+                    tmp_wav = tmp_file.name
+                    tmp_file.write(audio_bytes)
+
+                with wave.open(tmp_wav, "rb") as wf:
+                    audio_duration = wf.getnframes() / float(wf.getframerate())
+
+            # 已经是 MP3 数据，直接落盘
+            elif isinstance(audio_bytes, (bytes, bytearray)) and (
+                bytes(audio_bytes).startswith(b"ID3")
+                or bytes(audio_bytes[:2]) in (b"\xff\xfb", b"\xff\xf3", b"\xff\xf2")
+            ):
+                with open(voice_file, "wb") as f:
+                    f.write(audio_bytes)
+                audio_duration = get_audio_duration(voice_file)
+
+            # 兜底按 PCM 处理
+            else:
+                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_file:
+                    tmp_wav = tmp_file.name
+
+                with wave.open(tmp_wav, "wb") as wf:
+                    wf.setnchannels(channels)
+                    wf.setsampwidth(sample_width)
+                    wf.setframerate(sample_rate)
+                    wf.writeframes(audio_bytes)
+
+                audio_duration = len(audio_bytes) / float(sample_rate * channels * sample_width)
+
+            # 只有 WAV 临时文件时才需要转码
+            if tmp_wav:
+                ffmpeg_bin = os.environ.get("IMAGEIO_FFMPEG_EXE") or config.app.get("ffmpeg_path", "") or "ffmpeg"
+                cmd = [
+                    ffmpeg_bin,
+                    "-y",
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-i",
+                    tmp_wav,
+                    "-codec:a",
+                    "libmp3lame",
+                    "-q:a",
+                    "2",
+                    voice_file,
+                ]
+                subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+            if audio_duration <= 0:
+                audio_duration = get_audio_duration(voice_file)
+
+        except FileNotFoundError:
+            logger.error(
+                "ffmpeg executable not found. Set app.ffmpeg_path in config.toml or add ffmpeg to PATH."
             )
-        except Exception as e:
-            logger.error(f"Failed to load PCM audio: {e}")
             return None
-        
-        # 导出为MP3格式
-        audio_segment.export(voice_file, format="mp3")
+        except subprocess.CalledProcessError as e:
+            logger.error(f"ffmpeg convert failed: {e.stderr.decode(errors='ignore').strip()}")
+            return None
+        except Exception as e:
+            logger.error(f"Failed to process Gemini audio bytes: {e}")
+            return None
+        finally:
+            if tmp_wav and os.path.exists(tmp_wav):
+                try:
+                    os.remove(tmp_wav)
+                except Exception:
+                    pass
         
         logger.info(f"completed, output file: {voice_file}")
         
         # Gemini 路径仍然按项目的旧字幕结构写入，因此补齐旧字段。
         sub_maker = ensure_legacy_submaker_fields(SubMaker())
-        audio_duration = len(audio_segment) / 1000.0  # 转换为秒
         
         # 将音频长度转换为100纳秒单位（与edge_tts兼容）
         audio_duration_100ns = int(audio_duration * 10000000)
@@ -1590,9 +1830,6 @@ def gemini_tts(
         
         return sub_maker
         
-    except ImportError as e:
-        logger.error(f"Missing required package for Gemini TTS: {str(e)}. Please install: pip install pydub")
-        return None
     except Exception as e:
         logger.error(f"Gemini TTS failed, error: {str(e)}")
         return None

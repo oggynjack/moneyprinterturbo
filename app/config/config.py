@@ -35,6 +35,7 @@ def load_config():
 def save_config():
     with open(config_file, "w", encoding="utf-8") as f:
         _cfg["app"] = app
+        _cfg["whisper"] = whisper
         _cfg["azure"] = azure
         _cfg["siliconflow"] = siliconflow
         _cfg["ui"] = ui

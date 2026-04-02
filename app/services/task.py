@@ -93,8 +93,12 @@ def generate_audio(task_id, params, video_script):
         else:
             logger.info("no custom audio file provided, using TTS to generate audio.")
         audio_file = path.join(utils.task_dir(task_id), "audio.mp3")
+
+        # Strip "Line N:" / "Line N：" labels so edge-TTS cue matching works correctly
+        clean_script = re.sub(r"(?im)^Line\s*\d+[：:]\s*", "", video_script).strip()
+
         sub_maker = voice.tts(
-            text=video_script,
+            text=clean_script,
             voice_name=voice.parse_voice_name(params.voice_name),
             voice_rate=params.voice_rate,
             voice_file=audio_file,
@@ -139,10 +143,13 @@ def generate_subtitle(task_id, params, video_script, sub_maker, audio_file):
     subtitle_provider = config.app.get("subtitle_provider", "edge").strip().lower()
     logger.info(f"\n\n## generating subtitle, provider: {subtitle_provider}")
 
+    # Strip "Line N:" labels from the script for subtitle matching (same clean used in TTS)
+    clean_script = re.sub(r"(?im)^Line\s*\d+[：:]\s*", "", video_script).strip()
+
     subtitle_fallback = False
     if subtitle_provider == "edge":
         voice.create_subtitle(
-            text=video_script, sub_maker=sub_maker, subtitle_file=subtitle_path
+            text=clean_script, sub_maker=sub_maker, subtitle_file=subtitle_path
         )
         if not os.path.exists(subtitle_path):
             subtitle_fallback = True
@@ -151,7 +158,7 @@ def generate_subtitle(task_id, params, video_script, sub_maker, audio_file):
     if subtitle_provider == "whisper" or subtitle_fallback:
         subtitle.create(audio_file=audio_file, subtitle_file=subtitle_path)
         logger.info("\n\n## correcting subtitle")
-        subtitle.correct(subtitle_file=subtitle_path, video_script=video_script)
+        subtitle.correct(subtitle_file=subtitle_path, video_script=clean_script)
 
     subtitle_lines = subtitle.file_to_subtitles(subtitle_path)
     if not subtitle_lines:

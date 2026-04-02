@@ -1,3 +1,5 @@
+import base64
+import io
 import os
 import platform
 import sys
@@ -5,6 +7,7 @@ from uuid import uuid4
 
 import streamlit as st
 from loguru import logger
+from PIL import Image, ImageDraw, ImageFont
 
 # Add the root directory of the project to the system path to allow importing modules from the project
 root_dir = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
@@ -109,6 +112,8 @@ support_locales = [
     "vi-VN",
     "th-TH",
     "tr-TR",
+    "hi-IN",
+    "pa-IN",
 ]
 
 
@@ -122,6 +127,22 @@ def get_all_fonts():
     return fonts
 
 
+def render_font_preview(font_filename: str, text: str = "Hello | हैलो | ਸਤ ਸ੍ਰੀ ਅਕਾਲ", width: int = 420, height: int = 52) -> str:
+    """Render a font preview image and return as base64 PNG data URI."""
+    font_path = os.path.join(font_dir, font_filename)
+    img = Image.new("RGBA", (width, height), (30, 30, 30, 255))
+    draw = ImageDraw.Draw(img)
+    try:
+        font = ImageFont.truetype(font_path, 22)
+    except Exception:
+        font = ImageFont.load_default()
+    draw.text((10, 10), text, font=font, fill=(255, 255, 255, 255))
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    b64 = base64.b64encode(buf.getvalue()).decode()
+    return f"data:image/png;base64,{b64}"
+
+
 def get_all_songs():
     songs = []
     for root, dirs, files in os.walk(song_dir):
@@ -129,6 +150,49 @@ def get_all_songs():
             if file.endswith(".mp3"):
                 songs.append(file)
     return songs
+
+
+# Known script-compatibility for bundled fonts.
+# Fonts NOT listed here are assumed to work for any language (Latin/universal).
+FONT_SCRIPT_COMPAT = {
+    # Hindi (Devanagari) — must render ह,ि,ं etc.
+    "NotoSansDevanagari-Bold.ttf": ["hi-IN"],
+    "Nirmala.ttc": ["hi-IN", "pa-IN"],           # Windows system font; covers both
+    # Punjabi (Gurmukhi) — must render ਸ,ਤ,ੀ etc.
+    "NotoSansGurmukhi-Bold.ttf": ["pa-IN"],
+    # Chinese / CJK only
+    "MicrosoftYaHeiBold.ttc": ["zh-CN", "zh-HK", "zh-TW"],
+    "MicrosoftYaHeiNormal.ttc": ["zh-CN", "zh-HK", "zh-TW"],
+    "STHeitiLight.ttc": ["zh-CN", "zh-HK", "zh-TW"],
+    "STHeitiMedium.ttc": ["zh-CN", "zh-HK", "zh-TW"],
+}
+
+# Languages that need non-Latin script support → restrict font list
+SCRIPT_RESTRICTED_LANGS = {"hi-IN", "pa-IN", "zh-CN", "zh-HK", "zh-TW"}
+
+
+def get_fonts_for_language(language: str = "") -> list:
+    """Return font list filtered to only fonts that can render the given language."""
+    all_fonts = get_all_fonts()
+    if not language or language not in SCRIPT_RESTRICTED_LANGS:
+        return all_fonts  # no restriction for Latin/auto-detect
+
+    compatible = [
+        f for f in all_fonts
+        if language in FONT_SCRIPT_COMPAT.get(f, [language])  # listed and includes lang
+        or f not in FONT_SCRIPT_COMPAT  # not listed = assumed Latin, skip for restricted langs
+    ]
+    # Filter out fonts that are ONLY for other restricted languages
+    filtered = []
+    for f in all_fonts:
+        compat = FONT_SCRIPT_COMPAT.get(f)
+        if compat is None:
+            # Unknown font — skip for non-Latin languages (safe default)
+            continue
+        if language in compat:
+            filtered.append(f)
+
+    return filtered if filtered else all_fonts  # fallback to all if nothing matched
 
 
 def open_task_folder(task_id):
@@ -481,7 +545,123 @@ if not config.app.get("hide_config", False):
             )
             save_keys_to_config("pixabay_api_keys", pixabay_api_key)
 
+# ══════════════════════════════════════════════════════════════════
+# ⚡ PERFORMANCE SETTINGS TAB
+# ══════════════════════════════════════════════════════════════════
+with st.expander("⚡ Performance Settings", expanded=False):
+    st.markdown("### 🎬 FFmpeg Video Encoding")
+    st.caption("Controls how video clips are encoded. GPU mode is much faster if you have an NVIDIA GPU.")
+
+    perf_cols = st.columns(2)
+
+    with perf_cols[0]:
+        ffmpeg_modes = [
+            ("🖥️ CPU  — libx264 (safe, compatible)", "cpu"),
+            ("🚀 GPU  — NVENC (fastest, NVIDIA only)", "gpu"),
+            ("🔀 Hybrid — GPU → CPU fallback (recommended)", "hybrid"),
+        ]
+        saved_ffmpeg_mode = config.app.get("ffmpeg_mode", "cpu")
+        saved_ffmpeg_idx = next(
+            (i for i, (_, v) in enumerate(ffmpeg_modes) if v == saved_ffmpeg_mode), 0
+        )
+        selected_ffmpeg_idx = st.selectbox(
+            "FFmpeg Encoding Mode",
+            options=range(len(ffmpeg_modes)),
+            format_func=lambda x: ffmpeg_modes[x][0],
+            index=saved_ffmpeg_idx,
+            key="ffmpeg_mode_select",
+            help="GPU (NVENC) encodes video using your NVIDIA GPU — much faster than CPU. Hybrid tries GPU first, falls back to CPU automatically.",
+        )
+        config.app["ffmpeg_mode"] = ffmpeg_modes[selected_ffmpeg_idx][1]
+
+        if config.app["ffmpeg_mode"] in ("gpu", "hybrid"):
+            st.success("✅ NVENC GPU encoding active — video render will be faster!")
+        else:
+            st.info("ℹ️ CPU encoding active (libx264). Safe for all systems.")
+
+    with perf_cols[1]:
+        saved_threads = config.app.get("n_threads", 4)
+        n_threads = st.slider(
+            "🔧 FFmpeg Threads (CPU encoding)",
+            min_value=1,
+            max_value=16,
+            value=int(saved_threads),
+            step=1,
+            key="n_threads_slider",
+            help="Number of CPU threads for FFmpeg. More threads = faster CPU encoding. Ignored in pure GPU mode.",
+        )
+        config.app["n_threads"] = n_threads
+
+    st.divider()
+    st.markdown("### 🎤 Whisper Subtitle Transcription")
+    st.caption("Controls how Whisper generates subtitles when edge-TTS matching fails.")
+
+    whisper_cols = st.columns(3)
+
+    with whisper_cols[0]:
+        whisper_devices = [
+            ("🖥️ CPU (always works)", "cpu"),
+            ("⚡ CUDA GPU (requires CUDA 12)", "cuda"),
+        ]
+        saved_whisper_device = config.whisper.get("device", "cpu")
+        saved_whisper_device_idx = next(
+            (i for i, (_, v) in enumerate(whisper_devices) if v == saved_whisper_device), 0
+        )
+        selected_whisper_device_idx = st.selectbox(
+            "Whisper Device",
+            options=range(len(whisper_devices)),
+            format_func=lambda x: whisper_devices[x][0],
+            index=saved_whisper_device_idx,
+            key="whisper_device_select",
+        )
+        config.whisper["device"] = whisper_devices[selected_whisper_device_idx][1]
+
+    with whisper_cols[1]:
+        whisper_compute_types = [
+            ("int8 — CPU / low VRAM", "int8"),
+            ("float16 — GPU (recommended)", "float16"),
+            ("float32 — max precision", "float32"),
+        ]
+        saved_compute = config.whisper.get("compute_type", "int8")
+        saved_compute_idx = next(
+            (i for i, (_, v) in enumerate(whisper_compute_types) if v == saved_compute), 0
+        )
+        selected_compute_idx = st.selectbox(
+            "Compute Type",
+            options=range(len(whisper_compute_types)),
+            format_func=lambda x: whisper_compute_types[x][0],
+            index=saved_compute_idx,
+            key="whisper_compute_select",
+            help="float16 is recommended for CUDA GPU. Use int8 for CPU.",
+        )
+        config.whisper["compute_type"] = whisper_compute_types[selected_compute_idx][1]
+
+    with whisper_cols[2]:
+        whisper_models = ["tiny", "base", "small", "medium", "large-v2", "large-v3"]
+        saved_model = config.whisper.get("model_size", "large-v3")
+        saved_model_idx = whisper_models.index(saved_model) if saved_model in whisper_models else 5
+        selected_model = st.selectbox(
+            "Whisper Model",
+            options=whisper_models,
+            index=saved_model_idx,
+            key="whisper_model_select",
+            help="Larger models are more accurate but slower.\nlarge-v3 = best quality\ntiny/base = fastest",
+        )
+        config.whisper["model_size"] = selected_model
+
+    if config.whisper.get("device") == "cuda" and config.whisper.get("compute_type") == "float16":
+        st.success("✅ GPU Whisper active — subtitle generation will be fast!")
+    elif config.whisper.get("device") == "cuda":
+        st.warning("⚠️ GPU Whisper with non-float16 — consider float16 for best GPU performance.")
+    else:
+        st.info("ℹ️ CPU Whisper active. Works everywhere but slower for large-v3.")
+
+    if st.button("💾 Save Performance Settings", key="save_perf_settings"):
+        config.save_config()
+        st.success("Performance settings saved to config.toml!")
+
 llm_provider = config.app.get("llm_provider", "").lower()
+
 panel = st.columns(3)
 left_panel = panel[0]
 middle_panel = panel[1]
@@ -839,6 +1019,19 @@ with middle_panel:
             index=2,
         )
 
+        # Voice naturalness / expressiveness
+        saved_naturalness = config.ui.get("voice_naturalness", 1.0)
+        params.voice_naturalness = st.slider(
+            "🎭 Voice Naturalness (0=flat, 1=normal, 2=expressive)",
+            min_value=0.0,
+            max_value=2.0,
+            value=float(saved_naturalness),
+            step=0.1,
+            key="voice_naturalness_slider",
+            help="Adjusts how expressive and natural the speech sounds. Higher values add more emotion and variation.",
+        )
+        config.ui["voice_naturalness"] = params.voice_naturalness
+
         bgm_options = [
             (tr("No Background Music"), ""),
             (tr("Random Background Music"), "random"),
@@ -875,16 +1068,40 @@ with right_panel:
     with st.container(border=True):
         st.write(tr("Subtitle Settings"))
         params.subtitle_enabled = st.checkbox(tr("Enable Subtitles"), value=True)
-        font_names = get_all_fonts()
-        saved_font_name = config.ui.get("font_name", "MicrosoftYaHeiBold.ttc")
-        saved_font_name_index = 0
-        if saved_font_name in font_names:
-            saved_font_name_index = font_names.index(saved_font_name)
+
+        # ── Font selector with live preview (language-filtered) ───────────
+        font_names = get_fonts_for_language(params.video_language)
+
+        # If language is restricted and there are compatible fonts, show a helper tip
+        if params.video_language in SCRIPT_RESTRICTED_LANGS:
+            lang_label = {"hi-IN": "Hindi", "pa-IN": "Punjabi", "zh-CN": "Chinese"}.get(
+                params.video_language, params.video_language
+            )
+            if font_names:
+                st.caption(f"🔤 Showing only **{lang_label}**-compatible fonts ({len(font_names)} available)")
+            else:
+                st.warning(f"⚠️ No fonts found for {lang_label}. Showing all fonts.")
+                font_names = get_all_fonts()
+
+        saved_font_name = config.ui.get("font_name", "NotoSansDevanagari-Bold.ttf")
+        if saved_font_name not in font_names and font_names:
+            saved_font_name = font_names[0]
+        saved_font_name_index = font_names.index(saved_font_name) if saved_font_name in font_names else 0
+
         params.font_name = st.selectbox(
             tr("Font"), font_names, index=saved_font_name_index
         )
         config.ui["font_name"] = params.font_name
 
+        # Render font preview image inline
+        preview_b64 = render_font_preview(params.font_name)
+        st.markdown(
+            f'<img src="{preview_b64}" style="width:100%;border-radius:6px;margin-bottom:6px;"/>',
+            unsafe_allow_html=True,
+        )
+
+
+        # ── Position ─────────────────────────────────────────────────────
         subtitle_positions = [
             (tr("Top"), "top"),
             (tr("Center"), "center"),
@@ -922,6 +1139,7 @@ with right_panel:
             except ValueError:
                 st.error(tr("Please enter a valid number"))
 
+        # ── Font color + size ─────────────────────────────────────────────
         font_cols = st.columns([0.3, 0.7])
         with font_cols[0]:
             saved_text_fore_color = config.ui.get("text_fore_color", "#FFFFFF")
@@ -935,11 +1153,32 @@ with right_panel:
             params.font_size = st.slider(tr("Font Size"), 30, 100, saved_font_size)
             config.ui["font_size"] = params.font_size
 
+        # ── Stroke ────────────────────────────────────────────────────────
         stroke_cols = st.columns([0.3, 0.7])
         with stroke_cols[0]:
             params.stroke_color = st.color_picker(tr("Stroke Color"), "#000000")
         with stroke_cols[1]:
             params.stroke_width = st.slider(tr("Stroke Width"), 0.0, 10.0, 1.5)
+
+        # ── Subtitle background (transparent support) ─────────────────────
+        st.markdown("**Subtitle Background**")
+        bg_cols = st.columns([0.4, 0.6])
+        with bg_cols[0]:
+            saved_bg_color = config.ui.get("subtitle_bg_color", "#000000")
+            subtitle_bg_color = st.color_picker("Background Color", saved_bg_color, key="subtitle_bg_color_picker")
+            config.ui["subtitle_bg_color"] = subtitle_bg_color
+        with bg_cols[1]:
+            saved_bg_opacity = config.ui.get("subtitle_bg_opacity", 0)
+            subtitle_bg_opacity = st.slider("Opacity (0=transparent)", 0, 255, int(saved_bg_opacity), key="subtitle_bg_opacity_slider")
+            config.ui["subtitle_bg_opacity"] = subtitle_bg_opacity
+
+        # Convert hex color + opacity into RGBA tuple stored in params
+        def hex_to_rgba(hex_color, alpha):
+            hex_color = hex_color.lstrip("#")
+            r, g, b = int(hex_color[0:2], 16), int(hex_color[2:4], 16), int(hex_color[4:6], 16)
+            return (r, g, b, alpha)
+
+        params.subtitle_bg_color = hex_to_rgba(subtitle_bg_color, subtitle_bg_opacity)
     with st.expander(tr("Click to show API Key management"), expanded=False):
         st.subheader(tr("Manage Pexels and Pixabay API Keys"))
 

@@ -3,6 +3,7 @@ import logging
 import re
 import requests
 from typing import List
+from urllib.parse import urlparse
 
 import g4f
 from loguru import logger
@@ -14,6 +15,35 @@ from app.config import config
 _max_retries = 5
 _DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 _DEPRECATED_GEMINI_MODELS = {"gemini-pro", "gemini-1.0-pro"}
+
+
+def _normalize_gemini_api_endpoint(base_url: str) -> str:
+    """
+    Gemini SDK client_options.api_endpoint expects a host endpoint, not a full URL path.
+
+    Example:
+    - input:  https://generativelanguage.googleapis.com/v1
+    - output: generativelanguage.googleapis.com
+    """
+    raw = (base_url or "").strip()
+    if not raw:
+        return ""
+
+    parsed = urlparse(raw if "://" in raw else f"https://{raw}")
+    endpoint = (parsed.netloc or parsed.path or "").strip()
+
+    # urlparse("host/path") with scheme-less input may keep path in parsed.path,
+    # so guard against any remaining suffix path.
+    if "/" in endpoint:
+        endpoint = endpoint.split("/", 1)[0]
+
+    path = (parsed.path or "").strip("/")
+    if path:
+        logger.warning(
+            f"gemini_base_url should be endpoint host only; ignored path '/{path}'"
+        )
+
+    return endpoint
 
 
 def _normalize_text_response(content, llm_provider: str) -> str:
@@ -227,10 +257,15 @@ def _generate_response(prompt: str) -> str:
             if llm_provider == "gemini":
                 import google.generativeai as genai
 
-                if not base_url:
+                gemini_endpoint = _normalize_gemini_api_endpoint(base_url)
+                if not gemini_endpoint:
                     genai.configure(api_key=api_key, transport="rest")
                 else:
-                    genai.configure(api_key=api_key, transport="rest", client_options={'api_endpoint': base_url})
+                    genai.configure(
+                        api_key=api_key,
+                        transport="rest",
+                        client_options={"api_endpoint": gemini_endpoint},
+                    )
 
                 generation_config = {
                     "temperature": 0.5,

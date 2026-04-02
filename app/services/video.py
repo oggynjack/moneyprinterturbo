@@ -48,8 +48,40 @@ class SubClippedVideoClip:
 
 
 audio_codec = "aac"
-video_codec = "libx264"
 fps = 30
+
+
+def get_video_codec() -> str:
+    """Return FFmpeg video codec based on the configured performance mode."""
+    from app.config import config
+    mode = config.app.get("ffmpeg_mode", "cpu").lower()
+    if mode in ("gpu", "hybrid"):
+        return "h264_nvenc"
+    return "libx264"
+
+
+def safe_write_videofile(clip, output_path, codec, **kwargs):
+    """Write video file with automatic CPU fallback for hybrid/gpu modes."""
+    from app.config import config
+    mode = config.app.get("ffmpeg_mode", "cpu").lower()
+
+    # Add NVENC quality settings to match x264 CRF-quality output
+    if codec == "h264_nvenc":
+        extra = list(kwargs.pop("ffmpeg_params", []))
+        # -cq 18 = constant quality (lower = better), -preset p4 = balanced
+        # -b:v 0 forces CQ mode (not bitrate mode)
+        kwargs["ffmpeg_params"] = extra + ["-cq", "18", "-preset", "p4", "-b:v", "0"]
+
+    try:
+        clip.write_videofile(output_path, codec=codec, **kwargs)
+    except Exception as gpu_err:
+        if mode == "hybrid" and codec == "h264_nvenc":
+            logger.warning(f"GPU encoding failed ({gpu_err}), falling back to CPU (libx264)")
+            # Strip NVENC-only params before CPU fallback
+            kwargs.pop("ffmpeg_params", None)
+            clip.write_videofile(output_path, codec="libx264", **kwargs)
+        else:
+            raise
 
 def close_clip(clip):
     if clip is None:
@@ -230,9 +262,10 @@ def combine_videos(
             if clip.duration > max_clip_duration:
                 clip = clip.subclipped(0, max_clip_duration)
                 
-            # wirte clip to temp file
+            # write clip to temp file
             clip_file = f"{output_dir}/temp-clip-{i+1}.mp4"
-            clip.write_videofile(clip_file, logger=None, fps=fps, codec=video_codec)
+            codec = get_video_codec()
+            safe_write_videofile(clip, clip_file, codec=codec, logger=None, fps=fps)
 
             # Store clip duration before closing
             clip_duration_saved = clip.duration
@@ -290,8 +323,11 @@ def combine_videos(
             merged_clip = concatenate_videoclips([base_clip, next_clip])
 
             # save merged result to temp file
-            merged_clip.write_videofile(
-                filename=temp_merged_next,
+            codec = get_video_codec()
+            safe_write_videofile(
+                merged_clip,
+                temp_merged_next,
+                codec=codec,
                 threads=threads,
                 logger=None,
                 temp_audiofile_path=output_dir,
@@ -407,9 +443,14 @@ def generate_video(
         logger.info(f"  ⑤ font: {font_path}")
 
     def resolve_subtitle_background_color():
-        # 兼容历史参数：API 里 `text_background_color` 既可能是布尔值，
-        # 也可能是实际颜色字符串。统一在这里归一化，避免把 True/False
-        # 直接传给 TextClip 后出现不可预期的渲染结果。
+        # Priority 1: new subtitle_bg_color RGBA tuple (r, g, b, alpha 0-255)
+        bg = getattr(params, "subtitle_bg_color", None)
+        if bg is not None and isinstance(bg, (tuple, list)) and len(bg) == 4:
+            r, g, b, a = int(bg[0]), int(bg[1]), int(bg[2]), int(bg[3])
+            if a == 0:
+                return None  # fully transparent — no background box
+            return f"#{r:02x}{g:02x}{b:02x}"  # solid color (MoviePy doesn't support semi-transparent)
+        # Priority 2: legacy text_background_color bool/string
         if isinstance(params.text_background_color, bool):
             return "#000000" if params.text_background_color else None
         return params.text_background_color
@@ -505,8 +546,11 @@ def generate_video(
             logger.error(f"failed to add bgm: {str(e)}")
 
     video_clip = video_clip.with_audio(audio_clip)
-    video_clip.write_videofile(
+    codec = get_video_codec()
+    safe_write_videofile(
+        video_clip,
         output_file,
+        codec=codec,
         audio_codec=audio_codec,
         temp_audiofile_path=output_dir,
         threads=params.n_threads or 2,
