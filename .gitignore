@@ -35,3 +35,4 @@ test_*.py
 streamlit.log
 # MoviePy temporary audio artifacts
 temp-clip-*TEMP_MPY_wvf_snd.mp3
+/tech-yt-automation
