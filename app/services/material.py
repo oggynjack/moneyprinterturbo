@@ -212,6 +212,7 @@ def download_videos(
     video_contact_mode: VideoConcatMode = VideoConcatMode.random,
     audio_duration: float = 0.0,
     max_clip_duration: int = 5,
+    should_stop=None,
 ) -> List[str]:
     valid_video_items = []
     valid_video_urls = []
@@ -221,6 +222,10 @@ def download_videos(
         search_videos = search_videos_pixabay
 
     for search_term in search_terms:
+        if callable(should_stop) and should_stop():
+            logger.warning("download_videos stopped by user request before search")
+            break
+
         video_items = search_videos(
             search_term=search_term,
             minimum_duration=max_clip_duration,
@@ -250,6 +255,10 @@ def download_videos(
 
     total_duration = 0.0
     for item in valid_video_items:
+        if callable(should_stop) and should_stop():
+            logger.warning("download_videos stopped by user request during download")
+            break
+
         try:
             logger.info(f"downloading video: {item.url}")
             saved_video_path = save_video(

@@ -17,14 +17,23 @@ class UploadPostService:
     API_BASE = "https://api.upload-post.com"
 
     def __init__(self):
+        self._reload_config()
+
+    def _reload_config(self):
         self.api_key = config.app.get("upload_post_api_key", "")
         self.username = config.app.get("upload_post_username", "")
         self.enabled = config.app.get("upload_post_enabled", False)
-        self.platforms = config.app.get("upload_post_platforms", ["tiktok", "instagram"])
+        platforms = config.app.get("upload_post_platforms", ["tiktok", "instagram"])
+        if isinstance(platforms, str):
+            platforms = [x.strip() for x in platforms.split(",") if x.strip()]
+        if not isinstance(platforms, list):
+            platforms = ["tiktok", "instagram"]
+        self.platforms = platforms
         self.auto_upload = config.app.get("upload_post_auto_upload", False)
 
     def is_configured(self) -> bool:
         """Check if Upload-Post is properly configured."""
+        self._reload_config()
         return bool(self.api_key and self.username and self.enabled)
 
     def upload_video(
@@ -46,6 +55,8 @@ class UploadPostService:
         Returns:
             dict: API response with request_id and status
         """
+        self._reload_config()
+
         if not self.is_configured():
             logger.warning("Upload-Post is not configured. Skipping cross-post.")
             return {"success": False, "error": "Upload-Post not configured"}
@@ -109,6 +120,7 @@ class UploadPostService:
         Returns:
             dict: Status information
         """
+        self._reload_config()
         try:
             headers = {
                 'Authorization': f'Apikey {self.api_key}'

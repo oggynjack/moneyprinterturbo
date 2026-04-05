@@ -109,6 +109,11 @@ class VideoParams(BaseModel):
     n_threads: Optional[int] = 2
     paragraph_number: Optional[int] = 1
 
+    # Social auto-publishing controls
+    youtube_auto_upload: Optional[bool] = False
+    youtube_publish_mode: Optional[str] = "auto"  # auto, shorts, video
+    youtube_description: Optional[str] = ""
+
 
 class SubtitleRequest(BaseModel):
     video_script: str
@@ -289,7 +294,7 @@ class BgmRetrieveResponse(BaseResponse):
                         {
                             "name": "output013.mp3",
                             "size": 1891269,
-                            "file": "/moneyprinterturbo/resource/songs/output013.mp3",
+                            "file": "/0code-autogen/resource/songs/output013.mp3",
                         }
                     ]
                 },
@@ -303,7 +308,7 @@ class BgmUploadResponse(BaseResponse):
             "example": {
                 "status": 200,
                 "message": "success",
-                "data": {"file": "/moneyprinterturbo/resource/songs/example.mp3"},
+                "data": {"file": "/0code-autogen/resource/songs/example.mp3"},
             },
         }
 
@@ -318,7 +323,7 @@ class VideoMaterialRetrieveResponse(BaseResponse):
                         {
                             "name": "example.mp4",
                             "size": 12345678,
-                            "file": "/moneyprinterturbo/resource/videos/example.mp4",
+                            "file": "/0code-autogen/resource/videos/example.mp4",
                         }
                     ]
                 },
@@ -332,7 +337,7 @@ class VideoMaterialUploadResponse(BaseResponse):
                 "status": 200,
                 "message": "success",
                 "data": {
-                    "file": "/moneyprinterturbo/resource/videos/example.mp4",
+                    "file": "/0code-autogen/resource/videos/example.mp4",
                 },
             },
         }

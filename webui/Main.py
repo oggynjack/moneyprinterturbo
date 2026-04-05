@@ -1,8 +1,15 @@
-import base64
+﻿import base64
+import html
+import importlib
 import io
+import json
 import os
 import platform
+import re
 import sys
+import threading
+import time
+from collections import deque
 from uuid import uuid4
 
 import streamlit as st
@@ -18,6 +25,7 @@ if root_dir not in sys.path:
     print("")
 
 from app.config import config
+from app.models import const
 from app.models.schema import (
     MaterialInfo,
     VideoAspect,
@@ -25,21 +33,26 @@ from app.models.schema import (
     VideoParams,
     VideoTransitionMode,
 )
-from app.services import llm, voice
+from app.services import llm, voice, youtube_upload
 from app.services import task as tm
+from app.services import state as sm
 from app.utils import utils
 
+_WEBUI_TASK_THREADS = {}
+_WEBUI_TASK_LOCK = threading.Lock()
+_WEBUI_TASK_META_FILE = os.path.join(utils.storage_dir(create=True), "webui_active_task.json")
+
 st.set_page_config(
-    page_title="moneyprinterturbo",
+    page_title="0Code AutoGen",
     page_icon="🤖",
     layout="wide",
     initial_sidebar_state="auto",
     menu_items={
-        "Report a bug": "https://github.com/harry0703/moneyprinterturbo/issues",
-        "About": "# moneyprinterturbo\nSimply provide a topic or keyword for a video, and it will "
+        "Report a bug": "https://github.com/harry0703/0code-autogen/issues",
+        "About": "# 0Code AutoGen\nSimply provide a topic or keyword for a video, and it will "
         "automatically generate the video copy, video materials, video subtitles, "
         "and video background music before synthesizing a high-definition short "
-        "video.\n\nhttps://github.com/harry0703/moneyprinterturbo",
+        "video.\n\nhttps://github.com/harry0703/0code-autogen",
     },
 )
 
@@ -80,7 +93,7 @@ locales = utils.load_locales(i18n_dir)
 title_col, lang_col = st.columns([3, 1])
 
 with title_col:
-    st.title(f"moneyprinterturbo v{config.project_version}")
+    st.title(f"0Code AutoGen v{config.project_version}")
 
 with lang_col:
     display_languages = []
@@ -201,11 +214,184 @@ def open_task_folder(task_id):
         path = os.path.join(root_dir, "storage", "tasks", task_id)
         if os.path.exists(path):
             if sys == "Windows":
-                os.system(f"start {path}")
+                os.system(f'start "" "{path}"')
             if sys == "Darwin":
-                os.system(f"open {path}")
+                os.system(f'open "{path}"')
     except Exception as e:
         logger.error(e)
+
+
+_WINDOWS_RESERVED_NAMES = {
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    "COM1",
+    "COM2",
+    "COM3",
+    "COM4",
+    "COM5",
+    "COM6",
+    "COM7",
+    "COM8",
+    "COM9",
+    "LPT1",
+    "LPT2",
+    "LPT3",
+    "LPT4",
+    "LPT5",
+    "LPT6",
+    "LPT7",
+    "LPT8",
+    "LPT9",
+}
+
+
+def _first_non_empty_line(text: str) -> str:
+    for line in (text or "").splitlines():
+        candidate = line.strip()
+        if candidate:
+            return candidate
+    return ""
+
+
+def _sanitize_task_folder_name(name: str, max_len: int = 80) -> str:
+    if not name:
+        return ""
+
+    # Remove characters invalid in Windows paths and collapse spaces.
+    name = re.sub(r"[<>:\"/\\|?*\x00-\x1f]", " ", name)
+    name = re.sub(r"\s+", " ", name).strip().rstrip(". ")
+
+    if len(name) > max_len:
+        name = name[:max_len].rstrip(". ")
+
+    if name.upper() in _WINDOWS_RESERVED_NAMES:
+        name = f"{name}_task"
+
+    return name
+
+
+def _build_task_folder_name(video_script: str, video_subject: str) -> str:
+    first_line = _first_non_empty_line(video_script)
+    base = _sanitize_task_folder_name(first_line or (video_subject or "").strip())
+    if not base:
+        return str(uuid4())
+
+    tasks_root = os.path.join(root_dir, "storage", "tasks")
+    os.makedirs(tasks_root, exist_ok=True)
+
+    candidate = base
+    suffix = 2
+    while os.path.exists(os.path.join(tasks_root, candidate)):
+        candidate = f"{base}-{suffix}"
+        suffix += 1
+
+    return candidate
+
+
+def _task_log_file(task_id: str) -> str:
+    return os.path.join(utils.task_dir(task_id), "runtime.log")
+
+
+def _serialize_video_params(params: VideoParams) -> dict:
+    try:
+        if hasattr(params, "model_dump_json"):
+            return json.loads(params.model_dump_json())
+        return params.dict()
+    except Exception:
+        return {}
+
+
+def _save_active_task_meta(task_id: str, params: VideoParams):
+    payload = {
+        "task_id": task_id,
+        "params": _serialize_video_params(params),
+        "updated_at": int(time.time()),
+    }
+    try:
+        with open(_WEBUI_TASK_META_FILE, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.warning(f"failed to persist active task metadata: {e}")
+
+
+def _load_active_task_meta() -> dict:
+    if not os.path.exists(_WEBUI_TASK_META_FILE):
+        return {}
+    try:
+        with open(_WEBUI_TASK_META_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _clear_active_task_meta(task_id: str = ""):
+    meta = _load_active_task_meta()
+    meta_task_id = str(meta.get("task_id", "")).strip()
+    if task_id and meta_task_id and meta_task_id != task_id:
+        return
+    try:
+        if os.path.exists(_WEBUI_TASK_META_FILE):
+            os.remove(_WEBUI_TASK_META_FILE)
+    except Exception as e:
+        logger.warning(f"failed to clear active task metadata: {e}")
+
+
+def _is_task_thread_alive(task_id: str) -> bool:
+    with _WEBUI_TASK_LOCK:
+        thread = _WEBUI_TASK_THREADS.get(task_id)
+        return bool(thread and thread.is_alive())
+
+
+def _read_log_tail(log_file: str, max_lines: int = 400) -> list[str]:
+    if not os.path.exists(log_file):
+        return []
+    try:
+        with open(log_file, "r", encoding="utf-8", errors="ignore") as f:
+            return [line.rstrip("\n") for line in deque(f, maxlen=max_lines)]
+    except Exception:
+        return []
+
+
+def _start_task_in_background(task_id: str, params: VideoParams):
+    if _is_task_thread_alive(task_id):
+        return
+
+    def _runner():
+        log_file = _task_log_file(task_id)
+        log_sink_id = logger.add(
+            log_file,
+            level="DEBUG",
+            enqueue=True,
+            colorize=False,
+            format=(
+                "{time:%Y-%m-%d %H:%M:%S} | {level} | "
+                + '"{file.path}:{line}": {function} - {message}'
+                + "\n"
+            ),
+        )
+        try:
+            tm.start(task_id=task_id, params=params)
+        except Exception as e:
+            logger.exception(f"background task crashed: {e}")
+            sm.state.update_task(task_id, state=const.TASK_STATE_FAILED, error=str(e))
+        finally:
+            try:
+                logger.remove(log_sink_id)
+            except Exception:
+                pass
+
+            task_info = sm.state.get_task(task_id) or {}
+            state = task_info.get("state")
+            if state in (const.TASK_STATE_COMPLETE, const.TASK_STATE_FAILED):
+                _clear_active_task_meta(task_id)
+
+    thread = threading.Thread(target=_runner, name=f"webui-task-{task_id}", daemon=False)
+    with _WEBUI_TASK_LOCK:
+        _WEBUI_TASK_THREADS[task_id] = thread
+    thread.start()
 
 
 def scroll_to_bottom():
@@ -223,6 +409,138 @@ def scroll_to_bottom():
     </script>
     """
     st.components.v1.html(js, height=0, width=0)
+
+
+def _infer_runtime_status_and_progress(log_line: str):
+    text = (log_line or "").lower()
+    status = "Working"
+    progress = None
+
+    if "start generating video" in text:
+        status, progress = "Starting task", 2
+    elif "## generating video script" in text:
+        status, progress = "Generating script", 8
+    elif "## generating video terms" in text:
+        status, progress = "Generating search terms", 15
+    elif "## generating audio" in text:
+        status, progress = "Generating audio", 25
+    elif "## generating subtitle" in text:
+        status, progress = "Generating subtitles", 35
+    elif "## correcting subtitle" in text:
+        status, progress = "Correcting subtitles", 42
+    elif "## downloading videos from pexels" in text:
+        status, progress = "Downloading videos from Pexels", 52
+    elif "## downloading videos from pixabay" in text:
+        status, progress = "Downloading videos from Pixabay", 52
+    elif "downloading video:" in text:
+        status, progress = "Downloading video clips", 58
+    elif "## combining video" in text:
+        status, progress = "Combining clips", 76
+    elif "## generating video:" in text:
+        status, progress = "Rendering final video", 88
+    elif "video generation completed" in text or "task" in text and "finished" in text:
+        status, progress = "Completed", 100
+    elif "video generation failed" in text:
+        status = "Failed"
+
+    return status, progress
+
+
+def _render_log_box(log_placeholder, lines, box_id: str, max_lines: int = 400):
+    visible_lines = lines[-max_lines:]
+
+    def _styled_line(raw_line: str) -> str:
+        line = str(raw_line or "")
+        level_match = re.search(
+            r"\|\s*(DEBUG|INFO|WARNING|ERROR|CRITICAL|SUCCESS)\s*\|",
+            line,
+            flags=re.IGNORECASE,
+        )
+
+        line_color = "#d7dbe8"
+        level_badge_color = "#9fb3d8"
+        if level_match:
+            level = level_match.group(1).upper()
+            level_styles = {
+                "DEBUG": ("#b3bac8", "#9aa3b5"),
+                "INFO": ("#d7dbe8", "#74c0fc"),
+                "WARNING": ("#ffe8b3", "#f7b731"),
+                "ERROR": ("#ffd6d6", "#ff6b6b"),
+                "CRITICAL": ("#ffd6d6", "#ff3b30"),
+                "SUCCESS": ("#d9fbe1", "#2ecc71"),
+            }
+            line_color, level_badge_color = level_styles.get(
+                level, (line_color, level_badge_color)
+            )
+
+        escaped_line = html.escape(line)
+        if level_match:
+            raw_level_token = level_match.group(0)
+            escaped_level_token = html.escape(raw_level_token)
+            level_name = level_match.group(1).upper()
+            colored_token = (
+                f"| <span style='color:{level_badge_color};font-weight:800;'>{level_name}</span> |"
+            )
+            escaped_line = escaped_line.replace(escaped_level_token, colored_token, 1)
+
+        return f"<span style='color:{line_color};'>{escaped_line}</span>"
+
+    rendered_lines = [_styled_line(line) for line in visible_lines] if visible_lines else [
+        "<span style='color:#8b93a7;'>Waiting for logs...</span>"
+    ]
+    escaped_logs = "<br>".join(rendered_lines)
+    log_html = f"""
+    <div style=\"border:1px solid #2a2a2a;border-radius:10px;background:#0f1115;padding:10px;\">
+      <div style=\"color:#e6e6e6;font-size:14px;font-weight:700;margin-bottom:8px;\">Live Logs</div>
+      <div id=\"{box_id}\" style=\"height:320px;overflow-y:auto;background:#090b10;border:1px solid #20242f;border-radius:8px;padding:12px;color:#d7dbe8;font-family:Consolas,'Courier New',monospace;font-size:14px;line-height:1.55;white-space:pre-wrap;\">{escaped_logs}</div>
+    </div>
+    <script>
+      const box = document.getElementById('{box_id}');
+      if (box) {{ box.scrollTop = box.scrollHeight; }}
+    </script>
+    """
+    with log_placeholder:
+        st.components.v1.html(log_html, height=370)
+
+
+def _update_runtime_monitor(task_id: str, status_container, progress_container, log_container, log_box_id: str):
+    task_info = sm.state.get_task(task_id) or {}
+    state = task_info.get("state", const.TASK_STATE_PROCESSING)
+
+    progress = task_info.get("progress", 0)
+    try:
+        progress = int(progress)
+    except Exception:
+        progress = 0
+
+    log_lines = _read_log_tail(_task_log_file(task_id), max_lines=400)
+    inferred_status = "Working"
+    inferred_progress = None
+    if log_lines:
+        inferred_status, inferred_progress = _infer_runtime_status_and_progress(log_lines[-1])
+
+    if inferred_progress is not None:
+        progress = max(progress, inferred_progress)
+    progress = max(0, min(100, progress))
+
+    if state == const.TASK_STATE_COMPLETE:
+        status_text = "Completed"
+        status_container.success(f"Status: {status_text}")
+        progress = 100
+    elif state == const.TASK_STATE_FAILED:
+        status_text = "Failed"
+        status_container.error(f"Status: {status_text}")
+        progress = max(progress, 1)
+    else:
+        status_text = inferred_status if inferred_status else "Processing"
+        status_container.info(f"Status: {status_text}")
+
+    progress_container.progress(progress)
+
+    if not config.ui.get("hide_log", False):
+        _render_log_box(log_container, log_lines, log_box_id)
+
+    return task_info
 
 
 def init_log():
@@ -344,8 +662,8 @@ if not config.app.get("hide_config", False):
                             ##### Ollama配置说明
                             - **API Key**: 随便填写，比如 123
                             - **Base Url**: 一般为 http://localhost:11434/v1
-                                - 如果 `moneyprinterturbo` 和 `Ollama` **不在同一台机器上**，需要填写 `Ollama` 机器的IP地址
-                                - 如果 `moneyprinterturbo` 是 `Docker` 部署，建议填写 `http://host.docker.internal:11434/v1`
+                                - 如果 `0Code AutoGen` 和 `Ollama` **不在同一台机器上**，需要填写 `Ollama` 机器的IP地址
+                                - 如果 `0Code AutoGen` 是 `Docker` 部署，建议填写 `http://host.docker.internal:11434/v1`
                             - **Model Name**: 使用 `ollama list` 查看，比如 `qwen:7b`
                             """
 
@@ -660,6 +978,122 @@ with st.expander("⚡ Performance Settings", expanded=False):
         config.save_config()
         st.success("Performance settings saved to config.toml!")
 
+
+def render_subtitle_settings(params: VideoParams):
+    params.subtitle_enabled = st.checkbox(tr("Enable Subtitles"), value=True)
+
+    # Font selector with live preview (language-filtered)
+    font_names = get_fonts_for_language(params.video_language)
+
+    if params.video_language in SCRIPT_RESTRICTED_LANGS:
+        lang_label = {"hi-IN": "Hindi", "pa-IN": "Punjabi", "zh-CN": "Chinese"}.get(
+            params.video_language, params.video_language
+        )
+        if font_names:
+            st.caption(
+                f"Showing only **{lang_label}**-compatible fonts ({len(font_names)} available)"
+            )
+        else:
+            st.warning(f"No fonts found for {lang_label}. Showing all fonts.")
+            font_names = get_all_fonts()
+
+    saved_font_name = config.ui.get("font_name", "NotoSansDevanagari-Bold.ttf")
+    if saved_font_name not in font_names and font_names:
+        saved_font_name = font_names[0]
+    saved_font_name_index = (
+        font_names.index(saved_font_name) if saved_font_name in font_names else 0
+    )
+
+    params.font_name = st.selectbox(tr("Font"), font_names, index=saved_font_name_index)
+    config.ui["font_name"] = params.font_name
+
+    preview_b64 = render_font_preview(params.font_name)
+    st.markdown(
+        f'<img src="{preview_b64}" style="width:100%;border-radius:6px;margin-bottom:6px;"/>',
+        unsafe_allow_html=True,
+    )
+
+    subtitle_positions = [
+        (tr("Top"), "top"),
+        (tr("Center"), "center"),
+        (tr("Bottom"), "bottom"),
+        (tr("Custom"), "custom"),
+    ]
+    saved_subtitle_position = config.ui.get("subtitle_position", "bottom")
+    saved_position_index = 2
+    for i, (_, pos_value) in enumerate(subtitle_positions):
+        if pos_value == saved_subtitle_position:
+            saved_position_index = i
+            break
+
+    selected_index = st.selectbox(
+        tr("Position"),
+        index=saved_position_index,
+        options=range(len(subtitle_positions)),
+        format_func=lambda x: subtitle_positions[x][0],
+    )
+    params.subtitle_position = subtitle_positions[selected_index][1]
+    config.ui["subtitle_position"] = params.subtitle_position
+
+    if params.subtitle_position == "custom":
+        saved_custom_position = config.ui.get("custom_position", 70.0)
+        custom_position = st.text_input(
+            tr("Custom Position (% from top)"),
+            value=str(saved_custom_position),
+            key="custom_position_input",
+        )
+        try:
+            params.custom_position = float(custom_position)
+            if params.custom_position < 0 or params.custom_position > 100:
+                st.error(tr("Please enter a value between 0 and 100"))
+            else:
+                config.ui["custom_position"] = params.custom_position
+        except ValueError:
+            st.error(tr("Please enter a valid number"))
+
+    font_cols = st.columns([0.3, 0.7])
+    with font_cols[0]:
+        saved_text_fore_color = config.ui.get("text_fore_color", "#FFFFFF")
+        params.text_fore_color = st.color_picker(tr("Font Color"), saved_text_fore_color)
+        config.ui["text_fore_color"] = params.text_fore_color
+
+    with font_cols[1]:
+        saved_font_size = config.ui.get("font_size", 60)
+        params.font_size = st.slider(tr("Font Size"), 30, 100, saved_font_size)
+        config.ui["font_size"] = params.font_size
+
+    stroke_cols = st.columns([0.3, 0.7])
+    with stroke_cols[0]:
+        params.stroke_color = st.color_picker(tr("Stroke Color"), "#000000")
+    with stroke_cols[1]:
+        params.stroke_width = st.slider(tr("Stroke Width"), 0.0, 10.0, 1.5)
+
+    st.markdown("**Subtitle Background**")
+    bg_cols = st.columns([0.4, 0.6])
+    with bg_cols[0]:
+        saved_bg_color = config.ui.get("subtitle_bg_color", "#000000")
+        subtitle_bg_color = st.color_picker(
+            "Background Color", saved_bg_color, key="subtitle_bg_color_picker"
+        )
+        config.ui["subtitle_bg_color"] = subtitle_bg_color
+    with bg_cols[1]:
+        saved_bg_opacity = config.ui.get("subtitle_bg_opacity", 0)
+        subtitle_bg_opacity = st.slider(
+            "Opacity (0=transparent)",
+            0,
+            255,
+            int(saved_bg_opacity),
+            key="subtitle_bg_opacity_slider",
+        )
+        config.ui["subtitle_bg_opacity"] = subtitle_bg_opacity
+
+    def hex_to_rgba(hex_color, alpha):
+        hex_color = hex_color.lstrip("#")
+        r, g, b = int(hex_color[0:2], 16), int(hex_color[2:4], 16), int(hex_color[4:6], 16)
+        return (r, g, b, alpha)
+
+    params.subtitle_bg_color = hex_to_rgba(subtitle_bg_color, subtitle_bg_opacity)
+
 llm_provider = config.app.get("llm_provider", "").lower()
 
 panel = st.columns(3)
@@ -669,6 +1103,15 @@ right_panel = panel[2]
 
 params = VideoParams(video_subject="")
 uploaded_files = []
+
+active_task_meta = _load_active_task_meta()
+meta_task_id = str(active_task_meta.get("task_id", "")).strip()
+
+if "active_task_id" not in st.session_state:
+    st.session_state["active_task_id"] = meta_task_id
+elif not str(st.session_state.get("active_task_id", "")).strip() and meta_task_id:
+    # If current session lost task pointer, reattach from persisted metadata.
+    st.session_state["active_task_id"] = meta_task_id
 
 with left_panel:
     with st.container(border=True):
@@ -730,6 +1173,10 @@ with left_panel:
         params.video_terms = st.text_area(
             tr("Video Keywords"), value=st.session_state["video_terms"]
         )
+
+    with st.expander(tr("Subtitle Settings"), expanded=False):
+        with st.container(border=True):
+            render_subtitle_settings(params)
 
 with middle_panel:
     with st.container(border=True):
@@ -1066,119 +1513,26 @@ with middle_panel:
 
 with right_panel:
     with st.container(border=True):
-        st.write(tr("Subtitle Settings"))
-        params.subtitle_enabled = st.checkbox(tr("Enable Subtitles"), value=True)
-
-        # ── Font selector with live preview (language-filtered) ───────────
-        font_names = get_fonts_for_language(params.video_language)
-
-        # If language is restricted and there are compatible fonts, show a helper tip
-        if params.video_language in SCRIPT_RESTRICTED_LANGS:
-            lang_label = {"hi-IN": "Hindi", "pa-IN": "Punjabi", "zh-CN": "Chinese"}.get(
-                params.video_language, params.video_language
-            )
-            if font_names:
-                st.caption(f"🔤 Showing only **{lang_label}**-compatible fonts ({len(font_names)} available)")
-            else:
-                st.warning(f"⚠️ No fonts found for {lang_label}. Showing all fonts.")
-                font_names = get_all_fonts()
-
-        saved_font_name = config.ui.get("font_name", "NotoSansDevanagari-Bold.ttf")
-        if saved_font_name not in font_names and font_names:
-            saved_font_name = font_names[0]
-        saved_font_name_index = font_names.index(saved_font_name) if saved_font_name in font_names else 0
-
-        params.font_name = st.selectbox(
-            tr("Font"), font_names, index=saved_font_name_index
+        st.write("Runtime Monitor")
+        stop_task_button = st.button(
+            "Stop Generation",
+            key="stop_generation_button",
+            type="secondary",
+            use_container_width=True,
         )
-        config.ui["font_name"] = params.font_name
+        monitor_title = st.empty()
+        status_container = st.empty()
+        progress_container = st.empty()
+        log_container = st.empty()
+        runtime_log_box_id = "runtime-log-box"
 
-        # Render font preview image inline
-        preview_b64 = render_font_preview(params.font_name)
-        st.markdown(
-            f'<img src="{preview_b64}" style="width:100%;border-radius:6px;margin-bottom:6px;"/>',
-            unsafe_allow_html=True,
-        )
+        monitor_title.markdown("### Runtime Monitor")
+        status_container.info("Status: Idle")
+        progress_container.progress(0)
 
+        if not config.ui.get("hide_log", False):
+            _render_log_box(log_container, [], runtime_log_box_id)
 
-        # ── Position ─────────────────────────────────────────────────────
-        subtitle_positions = [
-            (tr("Top"), "top"),
-            (tr("Center"), "center"),
-            (tr("Bottom"), "bottom"),
-            (tr("Custom"), "custom"),
-        ]
-        saved_subtitle_position = config.ui.get("subtitle_position", "bottom")
-        saved_position_index = 2
-        for i, (_, pos_value) in enumerate(subtitle_positions):
-            if pos_value == saved_subtitle_position:
-                saved_position_index = i
-                break
-        selected_index = st.selectbox(
-            tr("Position"),
-            index=saved_position_index,
-            options=range(len(subtitle_positions)),
-            format_func=lambda x: subtitle_positions[x][0],
-        )
-        params.subtitle_position = subtitle_positions[selected_index][1]
-        config.ui["subtitle_position"] = params.subtitle_position
-
-        if params.subtitle_position == "custom":
-            saved_custom_position = config.ui.get("custom_position", 70.0)
-            custom_position = st.text_input(
-                tr("Custom Position (% from top)"),
-                value=str(saved_custom_position),
-                key="custom_position_input",
-            )
-            try:
-                params.custom_position = float(custom_position)
-                if params.custom_position < 0 or params.custom_position > 100:
-                    st.error(tr("Please enter a value between 0 and 100"))
-                else:
-                    config.ui["custom_position"] = params.custom_position
-            except ValueError:
-                st.error(tr("Please enter a valid number"))
-
-        # ── Font color + size ─────────────────────────────────────────────
-        font_cols = st.columns([0.3, 0.7])
-        with font_cols[0]:
-            saved_text_fore_color = config.ui.get("text_fore_color", "#FFFFFF")
-            params.text_fore_color = st.color_picker(
-                tr("Font Color"), saved_text_fore_color
-            )
-            config.ui["text_fore_color"] = params.text_fore_color
-
-        with font_cols[1]:
-            saved_font_size = config.ui.get("font_size", 60)
-            params.font_size = st.slider(tr("Font Size"), 30, 100, saved_font_size)
-            config.ui["font_size"] = params.font_size
-
-        # ── Stroke ────────────────────────────────────────────────────────
-        stroke_cols = st.columns([0.3, 0.7])
-        with stroke_cols[0]:
-            params.stroke_color = st.color_picker(tr("Stroke Color"), "#000000")
-        with stroke_cols[1]:
-            params.stroke_width = st.slider(tr("Stroke Width"), 0.0, 10.0, 1.5)
-
-        # ── Subtitle background (transparent support) ─────────────────────
-        st.markdown("**Subtitle Background**")
-        bg_cols = st.columns([0.4, 0.6])
-        with bg_cols[0]:
-            saved_bg_color = config.ui.get("subtitle_bg_color", "#000000")
-            subtitle_bg_color = st.color_picker("Background Color", saved_bg_color, key="subtitle_bg_color_picker")
-            config.ui["subtitle_bg_color"] = subtitle_bg_color
-        with bg_cols[1]:
-            saved_bg_opacity = config.ui.get("subtitle_bg_opacity", 0)
-            subtitle_bg_opacity = st.slider("Opacity (0=transparent)", 0, 255, int(saved_bg_opacity), key="subtitle_bg_opacity_slider")
-            config.ui["subtitle_bg_opacity"] = subtitle_bg_opacity
-
-        # Convert hex color + opacity into RGBA tuple stored in params
-        def hex_to_rgba(hex_color, alpha):
-            hex_color = hex_color.lstrip("#")
-            r, g, b = int(hex_color[0:2], 16), int(hex_color[2:4], 16), int(hex_color[4:6], 16)
-            return (r, g, b, alpha)
-
-        params.subtitle_bg_color = hex_to_rgba(subtitle_bg_color, subtitle_bg_opacity)
     with st.expander(tr("Click to show API Key management"), expanded=False):
         st.subheader(tr("Manage Pexels and Pixabay API Keys"))
 
@@ -1243,10 +1597,227 @@ with right_panel:
                     config.save_config()
                     st.success(tr("Pixabay API Key deleted successfully"))
 
+with st.expander("Social Upload Automation", expanded=False):
+    st.caption(
+        "Automatically publish generated videos to YouTube and other platforms after each task finishes."
+    )
+
+    st.markdown("#### Upload-Post (TikTok / Instagram)")
+    upload_post_enabled = st.checkbox(
+        "Enable Upload-Post",
+        value=bool(config.app.get("upload_post_enabled", False)),
+        key="upload_post_enabled_checkbox",
+    )
+    upload_post_auto_upload = st.checkbox(
+        "Auto upload via Upload-Post after generation",
+        value=bool(config.app.get("upload_post_auto_upload", False)),
+        key="upload_post_auto_upload_checkbox",
+    )
+
+    config.app["upload_post_enabled"] = upload_post_enabled
+    config.app["upload_post_auto_upload"] = upload_post_auto_upload
+
+    upload_post_username = st.text_input(
+        "Upload-Post Username",
+        value=str(config.app.get("upload_post_username", "")),
+        key="upload_post_username_input",
+    ).strip()
+    upload_post_api_key = st.text_input(
+        "Upload-Post API Key",
+        value=str(config.app.get("upload_post_api_key", "")),
+        type="password",
+        key="upload_post_api_key_input",
+    ).strip()
+
+    config.app["upload_post_username"] = upload_post_username
+    config.app["upload_post_api_key"] = upload_post_api_key
+
+    upload_post_platform_options = ["tiktok", "instagram"]
+    saved_upload_post_platforms = config.app.get("upload_post_platforms", upload_post_platform_options)
+    if isinstance(saved_upload_post_platforms, str):
+        saved_upload_post_platforms = [x.strip() for x in saved_upload_post_platforms.split(",") if x.strip()]
+    if not isinstance(saved_upload_post_platforms, list):
+        saved_upload_post_platforms = upload_post_platform_options
+
+    upload_post_platforms = st.multiselect(
+        "Upload-Post Platforms",
+        options=upload_post_platform_options,
+        default=[p for p in saved_upload_post_platforms if p in upload_post_platform_options],
+        key="upload_post_platforms_select",
+    )
+    config.app["upload_post_platforms"] = upload_post_platforms or upload_post_platform_options
+
+    st.divider()
+    st.markdown("#### YouTube")
+
+    youtube_upload_enabled = st.checkbox(
+        "Enable YouTube Upload",
+        value=bool(config.app.get("youtube_upload_enabled", False)),
+        key="youtube_upload_enabled_checkbox",
+    )
+    youtube_auto_upload = st.checkbox(
+        "Auto upload to YouTube after generation",
+        value=bool(config.app.get("youtube_auto_upload", False)),
+        key="youtube_auto_upload_checkbox",
+    )
+
+    config.app["youtube_upload_enabled"] = youtube_upload_enabled
+    config.app["youtube_auto_upload"] = youtube_auto_upload
+
+    publish_mode_options = ["auto", "shorts", "video"]
+    saved_publish_mode = str(config.app.get("youtube_publish_mode", "auto")).strip().lower()
+    if saved_publish_mode not in publish_mode_options:
+        saved_publish_mode = "auto"
+    youtube_publish_mode = st.selectbox(
+        "YouTube Publish Mode",
+        options=publish_mode_options,
+        index=publish_mode_options.index(saved_publish_mode),
+        key="youtube_publish_mode_select",
+        help="auto: detect Shorts by video shape/duration, shorts: force #Shorts metadata, video: regular upload.",
+    )
+    config.app["youtube_publish_mode"] = youtube_publish_mode
+
+    privacy_options = ["private", "unlisted", "public"]
+    saved_privacy = str(config.app.get("youtube_privacy_status", "private")).strip().lower()
+    if saved_privacy not in privacy_options:
+        saved_privacy = "private"
+    youtube_privacy_status = st.selectbox(
+        "YouTube Privacy",
+        options=privacy_options,
+        index=privacy_options.index(saved_privacy),
+        key="youtube_privacy_status_select",
+    )
+    config.app["youtube_privacy_status"] = youtube_privacy_status
+
+    youtube_category_id = st.text_input(
+        "YouTube Category ID",
+        value=str(config.app.get("youtube_category_id", "22")),
+        key="youtube_category_id_input",
+        help="22 = People & Blogs, 24 = Entertainment, 28 = Science & Technology, etc.",
+    ).strip()
+    config.app["youtube_category_id"] = youtube_category_id or "22"
+
+    st.caption("Provide either a Client Secret File OR Google OAuth Client ID + Client Secret.")
+
+    youtube_client_secrets_file = st.text_input(
+        "Google OAuth Client Secret File (optional)",
+        value=str(config.app.get("youtube_client_secrets_file", "")),
+        key="youtube_client_secrets_file_input",
+        help="Optional path to client_secret.json downloaded from Google Cloud OAuth credentials.",
+    ).strip()
+
+    youtube_client_id = st.text_input(
+        "Google OAuth Client ID (optional)",
+        value=str(config.app.get("youtube_client_id", "")),
+        key="youtube_client_id_input",
+        help="If you do not want to use a file, paste your OAuth client ID here.",
+    ).strip()
+
+    youtube_client_secret = st.text_input(
+        "Google OAuth Client Secret (optional)",
+        value=str(config.app.get("youtube_client_secret", "")),
+        type="password",
+        key="youtube_client_secret_input",
+        help="If you do not want to use a file, paste your OAuth client secret here.",
+    ).strip()
+
+    youtube_token_file = st.text_input(
+        "YouTube OAuth Token File",
+        value=str(config.app.get("youtube_token_file", "storage/oauth/youtube_token.json")),
+        key="youtube_token_file_input",
+    ).strip()
+
+    config.app["youtube_client_secrets_file"] = youtube_client_secrets_file
+    config.app["youtube_client_id"] = youtube_client_id
+    config.app["youtube_client_secret"] = youtube_client_secret
+    config.app["youtube_token_file"] = youtube_token_file or "storage/oauth/youtube_token.json"
+
+    saved_youtube_tags = config.app.get("youtube_tags", ["0CodeAutoGen", "AIVideo"])
+    if isinstance(saved_youtube_tags, list):
+        saved_youtube_tags_text = ", ".join([str(x).strip() for x in saved_youtube_tags if str(x).strip()])
+    else:
+        saved_youtube_tags_text = str(saved_youtube_tags)
+
+    youtube_tags_text = st.text_input(
+        "YouTube Tags (comma-separated)",
+        value=saved_youtube_tags_text,
+        key="youtube_tags_input",
+    )
+    config.app["youtube_tags"] = [x.strip() for x in youtube_tags_text.split(",") if x.strip()]
+
+    youtube_description = st.text_area(
+        "YouTube Description (optional)",
+        value=str(config.app.get("youtube_default_description", "")),
+        height=100,
+        key="youtube_description_input",
+        help="If empty, generated script text will be used as the upload description.",
+    )
+    config.app["youtube_default_description"] = youtube_description
+
+    params.youtube_auto_upload = youtube_auto_upload
+    params.youtube_publish_mode = youtube_publish_mode
+    params.youtube_description = youtube_description.strip()
+
+    auth_col1, auth_col2 = st.columns(2)
+    with auth_col1:
+        if st.button("Authorize YouTube Account", key="youtube_authorize_button", use_container_width=True):
+            with st.spinner("Opening Google login authorization flow..."):
+                yt_module = importlib.reload(youtube_upload)
+                auth_result = yt_module.authorize_youtube_account(interactive=True)
+            if auth_result.get("success"):
+                st.success(auth_result.get("message", "YouTube account authorized."))
+            else:
+                st.error(auth_result.get("message", "YouTube authorization failed."))
+    with auth_col2:
+        if st.button("Check YouTube Authorization", key="youtube_check_auth_button", use_container_width=True):
+            yt_module = importlib.reload(youtube_upload)
+            status = yt_module.youtube_upload_service.auth_status()
+            if status.get("success") and status.get("authorized"):
+                st.success(status.get("message", "YouTube authorization is ready."))
+            else:
+                st.warning(status.get("message", "YouTube authorization is not ready."))
+
 start_button = st.button(tr("Generate Video"), use_container_width=True, type="primary")
+
+if stop_task_button:
+    active_to_stop = str(st.session_state.get("active_task_id", "")).strip()
+    if not active_to_stop:
+        active_to_stop = str(_load_active_task_meta().get("task_id", "")).strip()
+
+    if active_to_stop:
+        task_snapshot = sm.state.get_task(active_to_stop) or {}
+        current_state = task_snapshot.get("state", const.TASK_STATE_PROCESSING)
+        current_progress = task_snapshot.get("progress", 0)
+        try:
+            current_progress = int(current_progress)
+        except Exception:
+            current_progress = 0
+
+        sm.state.update_task(
+            active_to_stop,
+            state=current_state,
+            progress=current_progress,
+            stop_requested=True,
+            error="Stop requested by user.",
+        )
+        st.warning("Stop requested. Current stage will finish safely, then task will terminate.")
+    else:
+        st.info("No active task to stop.")
+
+active_task_before_start = str(st.session_state.get("active_task_id", "")).strip()
+if not active_task_before_start:
+    active_task_before_start = str(_load_active_task_meta().get("task_id", "")).strip()
+
+if start_button and active_task_before_start:
+    existing_task = sm.state.get_task(active_task_before_start) or {}
+    existing_state = existing_task.get("state", const.TASK_STATE_PROCESSING)
+    stop_requested = bool(existing_task.get("stop_requested", False))
+    if existing_state == const.TASK_STATE_PROCESSING and not stop_requested:
+        st.warning("A generation task is already running. Stop it first or wait for completion.")
+        start_button = False
+
 if start_button:
     config.save_config()
-    task_id = str(uuid4())
     if not params.video_subject and not params.video_script:
         st.error(tr("Video Script and Subject Cannot Both Be Empty"))
         scroll_to_bottom()
@@ -1266,6 +1837,11 @@ if start_button:
         st.error(tr("Please Enter the Pixabay API Key"))
         scroll_to_bottom()
         st.stop()
+
+    task_id = _build_task_folder_name(
+        video_script=params.video_script,
+        video_subject=params.video_subject,
+    )
 
     if uploaded_files:
         local_videos_dir = utils.storage_dir("local_videos", create=True)
@@ -1300,42 +1876,99 @@ if start_button:
             if m.url:
                 params.video_materials.append(m)
 
-    log_container = st.empty()
-    log_records = []
-
-    def log_received(msg):
-        if config.ui["hide_log"]:
-            return
-        with log_container:
-            log_records.append(msg)
-            st.code("\n".join(log_records))
-
-    logger.add(log_received)
-
     st.toast(tr("Generating Video"))
     logger.info(tr("Start Generating Video"))
     logger.info(utils.to_json(params))
+
+    st.session_state["active_task_id"] = task_id
+    _save_active_task_meta(task_id, params)
+    _start_task_in_background(task_id, params)
+
     scroll_to_bottom()
 
-    result = tm.start(task_id=task_id, params=params)
-    if not result or "videos" not in result:
-        st.error(tr("Video Generation Failed"))
-        logger.error(tr("Video Generation Failed"))
-        scroll_to_bottom()
-        st.stop()
+active_task_id = str(st.session_state.get("active_task_id", "")).strip()
+if active_task_id:
+    monitor_title.markdown("### Runtime Monitor")
 
-    video_files = result.get("videos", [])
-    st.success(tr("Video Generation Completed"))
-    try:
-        if video_files:
-            player_cols = st.columns(len(video_files) * 2 + 1)
-            for i, url in enumerate(video_files):
-                player_cols[i * 2 + 1].video(url)
-    except Exception:
-        pass
+    task_info = sm.state.get_task(active_task_id) or {}
+    if not task_info and not _is_task_thread_alive(active_task_id):
+        active_task_meta = _load_active_task_meta()
+        if active_task_meta.get("task_id") == active_task_id:
+            resume_params_dict = active_task_meta.get("params") or {}
+            try:
+                resume_params = VideoParams(**resume_params_dict)
+                status_container.info("Status: Resuming previous task")
+                _start_task_in_background(active_task_id, resume_params)
+            except Exception as e:
+                status_container.error(f"Status: Failed to resume task ({e})")
+                _clear_active_task_meta(active_task_id)
+                st.session_state["active_task_id"] = ""
+        else:
+            meta_task_id = str(active_task_meta.get("task_id", "")).strip()
+            if meta_task_id:
+                st.session_state["active_task_id"] = meta_task_id
+                active_task_id = meta_task_id
+                status_container.info("Status: Re-attached to active task")
+            else:
+                st.session_state["active_task_id"] = ""
+                status_container.info("Status: Idle")
+                progress_container.progress(0)
+                if not config.ui.get("hide_log", False):
+                    _render_log_box(log_container, [], runtime_log_box_id)
 
-    open_task_folder(task_id)
-    logger.info(tr("Video Generation Completed"))
-    scroll_to_bottom()
+    if st.session_state.get("active_task_id"):
+        task_info = _update_runtime_monitor(
+            task_id=active_task_id,
+            status_container=status_container,
+            progress_container=progress_container,
+            log_container=log_container,
+            log_box_id=runtime_log_box_id,
+        )
+    else:
+        task_info = {}
+
+    while True:
+        state = task_info.get("state")
+        if state in (const.TASK_STATE_COMPLETE, const.TASK_STATE_FAILED):
+            break
+        if not _is_task_thread_alive(active_task_id):
+            # If the process restarted and state was in-memory only, avoid infinite wait.
+            break
+
+        time.sleep(1)
+        task_info = _update_runtime_monitor(
+            task_id=active_task_id,
+            status_container=status_container,
+            progress_container=progress_container,
+            log_container=log_container,
+            log_box_id=runtime_log_box_id,
+        )
+
+    state = task_info.get("state")
+    if state == const.TASK_STATE_COMPLETE:
+        video_files = task_info.get("videos", []) or []
+        st.success(tr("Video Generation Completed"))
+        try:
+            if video_files:
+                player_cols = st.columns(len(video_files) * 2 + 1)
+                for i, url in enumerate(video_files):
+                    player_cols[i * 2 + 1].video(url)
+        except Exception:
+            pass
+
+        if st.session_state.get("opened_task_folder_id") != active_task_id:
+            open_task_folder(active_task_id)
+            st.session_state["opened_task_folder_id"] = active_task_id
+
+    elif state == const.TASK_STATE_FAILED:
+        error_detail = str(task_info.get("error", "")).strip()
+        if error_detail:
+            st.error(f"{tr('Video Generation Failed')}: {error_detail}")
+            logger.error(f"{tr('Video Generation Failed')}: {error_detail}")
+        else:
+            st.error(tr("Video Generation Failed"))
+            logger.error(tr("Video Generation Failed"))
 
 config.save_config()
+
+

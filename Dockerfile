@@ -2,12 +2,12 @@
 FROM python:3.11-slim-bullseye
 
 # Set the working directory in the container
-WORKDIR /moneyprinterturbo
+WORKDIR /0code-autogen
 
-# 设置/moneyprinterturbo目录权限为777
-RUN chmod 777 /moneyprinterturbo
+# 设置/0code-autogen目录权限为777
+RUN chmod 777 /0code-autogen
 
-ENV PYTHONPATH="/moneyprinterturbo"
+ENV PYTHONPATH="/0code-autogen"
 
 # Install system dependencies with domestic mirrors first for stability
 RUN echo "deb http://mirrors.aliyun.com/debian bullseye main" > /etc/apt/sources.list && \
@@ -65,10 +65,10 @@ EXPOSE 8501
 CMD ["streamlit", "run", "./webui/Main.py","--browser.serverAddress=127.0.0.1","--server.enableCORS=True","--browser.gatherUsageStats=False"]
 
 # 1. Build the Docker image using the following command
-# docker build -t moneyprinterturbo .
+# docker build -t 0code-autogen .
 
 # 2. Run the Docker container using the following command
 ## For Linux or MacOS:
-# docker run -v $(pwd)/config.toml:/moneyprinterturbo/config.toml -v $(pwd)/storage:/moneyprinterturbo/storage -p 8501:8501 moneyprinterturbo
+# docker run -v $(pwd)/config.toml:/0code-autogen/config.toml -v $(pwd)/storage:/0code-autogen/storage -p 8501:8501 0code-autogen
 ## For Windows:
-# docker run -v ${PWD}/config.toml:/moneyprinterturbo/config.toml -v ${PWD}/storage:/moneyprinterturbo/storage -p 8501:8501 moneyprinterturbo
+# docker run -v ${PWD}/config.toml:/0code-autogen/config.toml -v ${PWD}/storage:/0code-autogen/storage -p 8501:8501 0code-autogen

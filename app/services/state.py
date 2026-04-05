@@ -43,12 +43,15 @@ class MemoryState(BaseState):
         if progress > 100:
             progress = 100
 
-        self._tasks[task_id] = {
+        existing = self._tasks.get(task_id, {})
+        merged = {
+            **existing,
             "task_id": task_id,
             "state": state,
             "progress": progress,
-            **kwargs,
         }
+        merged.update(kwargs)
+        self._tasks[task_id] = merged
 
     def get_task(self, task_id: str):
         return self._tasks.get(task_id, None)

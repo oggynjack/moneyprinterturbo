@@ -4,7 +4,7 @@ import pathlib
 import shutil
 from typing import Union
 
-from fastapi import BackgroundTasks, Depends, Path, Request, UploadFile
+from fastapi import BackgroundTasks, Depends, Path, Query, Request, UploadFile
 from fastapi.params import File
 from fastapi.responses import FileResponse, StreamingResponse
 from loguru import logger
@@ -30,6 +30,7 @@ from app.models.schema import (
 )
 from app.services import state as sm
 from app.services import task as tm
+from app.services import youtube_upload
 from app.utils import utils
 
 # 认证依赖项
@@ -74,6 +75,22 @@ def create_audio(
     return create_task(request, body, stop_at="audio")
 
 
+@router.get("/youtube/auth/status", summary="Get YouTube OAuth authorization status")
+def youtube_auth_status(request: Request):
+    _ = base.get_task_id(request)
+    status = youtube_upload.youtube_upload_service.auth_status()
+    code = 200 if status.get("success") else 400
+    return utils.get_response(code, status, status.get("message", ""))
+
+
+@router.post("/youtube/auth/authorize", summary="Trigger YouTube OAuth authorization")
+def youtube_authorize(request: Request, force: bool = Query(False)):
+    _ = base.get_task_id(request)
+    result = youtube_upload.authorize_youtube_account(interactive=True, force=force)
+    code = 200 if result.get("success") else 400
+    return utils.get_response(code, result, result.get("message", ""))
+
+
 def create_task(
     request: Request,
     body: Union[TaskVideoRequest, SubtitleRequest, AudioRequest],
@@ -95,8 +112,6 @@ def create_task(
         raise HttpException(
             task_id=task_id, status_code=400, message=f"{request_id}: {str(e)}"
         )
-
-from fastapi import Query
 
 @router.get("/tasks", response_model=TaskQueryResponse, summary="Get all tasks")
 def get_all_tasks(request: Request, page: int = Query(1, ge=1), page_size: int = Query(10, ge=1)):

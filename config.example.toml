@@ -185,6 +185,51 @@ redis_password = ""
 # 文生视频时的最大并发任务数
 max_concurrent_tasks = 5
 
+########## Upload-Post (Cross-post to TikTok/Instagram)
+upload_post_enabled = false
+upload_post_api_key = ""
+upload_post_username = ""
+upload_post_platforms = ["tiktok", "instagram"]
+upload_post_auto_upload = false
+
+########## YouTube Auto Upload (OAuth)
+# Enable YouTube integration and upload generated videos automatically.
+#
+# You can configure OAuth in either way:
+# 1) File mode: set youtube_client_secrets_file to your client_secret.json
+# 2) Inline mode: set youtube_client_id + youtube_client_secret (no file needed)
+
+# Enable/disable YouTube uploader
+youtube_upload_enabled = false
+
+# Automatically upload generated videos after each task
+youtube_auto_upload = false
+
+# Upload mode: "auto" | "shorts" | "video"
+youtube_publish_mode = "auto"
+
+# YouTube privacy: "private" | "unlisted" | "public"
+youtube_privacy_status = "private"
+
+# YouTube category id (22 = People & Blogs)
+youtube_category_id = "22"
+
+# Tags added to uploaded videos
+youtube_tags = ["0CodeAutoGen", "AIVideo"]
+
+# File mode (optional)
+youtube_client_secrets_file = ""
+
+# Inline mode (optional)
+youtube_client_id = ""
+youtube_client_secret = ""
+
+# Path to store OAuth access token
+youtube_token_file = "storage/oauth/youtube_token.json"
+
+# Optional default YouTube description text
+youtube_default_description = ""
+
 
 [whisper]
 # Only effective when subtitle_provider is "whisper"
@@ -257,3 +302,40 @@ upload_post_platforms = ["tiktok", "instagram"]
 
 # Automatically cross-post videos after generation (if false, you'll need to call the API manually)
 upload_post_auto_upload = false
+
+########## YouTube Auto Upload (OAuth)
+# Enable YouTube integration and upload generated videos automatically.
+#
+# Steps:
+# 1. Create OAuth credentials in Google Cloud Console.
+# 2. Download client_secret.json.
+# 3. Set youtube_client_secrets_file below.
+# 4. In WebUI, click "Authorize YouTube Account" once to complete Google login.
+
+# Enable/disable YouTube uploader
+youtube_upload_enabled = false
+
+# Automatically upload generated videos after each task
+youtube_auto_upload = false
+
+# Upload mode: "auto" | "shorts" | "video"
+youtube_publish_mode = "auto"
+
+# YouTube privacy: "private" | "unlisted" | "public"
+youtube_privacy_status = "private"
+
+# YouTube category id (22 = People & Blogs)
+youtube_category_id = "22"
+
+# Tags added to uploaded videos
+youtube_tags = ["0CodeAutoGen", "AIVideo"]
+
+# Path to Google OAuth client secret file
+# Example: "./credentials/client_secret.json"
+youtube_client_secrets_file = ""
+
+# Path to store OAuth access token
+youtube_token_file = "storage/oauth/youtube_token.json"
+
+# Optional default YouTube description text
+youtube_default_description = ""

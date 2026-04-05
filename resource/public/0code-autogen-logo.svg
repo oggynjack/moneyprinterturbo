@@ -1,0 +1,46 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="7680" height="4320" viewBox="0 0 7680 4320" role="img" aria-label="0Code AutoGen icon logo">
+  <defs>
+    <linearGradient id="leftLoop" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#38bdf8"/>
+      <stop offset="100%" stop-color="#0ea5e9"/>
+    </linearGradient>
+    <linearGradient id="rightLoop" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#22c55e"/>
+      <stop offset="100%" stop-color="#f59e0b"/>
+    </linearGradient>
+    <linearGradient id="core" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0f172a"/>
+      <stop offset="100%" stop-color="#1e293b"/>
+    </linearGradient>
+    <linearGradient id="energy" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#38bdf8"/>
+      <stop offset="50%" stop-color="#22c55e"/>
+      <stop offset="100%" stop-color="#f59e0b"/>
+    </linearGradient>
+    <radialGradient id="ambient" cx="50%" cy="50%" r="55%">
+      <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.26"/>
+      <stop offset="45%" stop-color="#22c55e" stop-opacity="0.20"/>
+      <stop offset="100%" stop-color="#f59e0b" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="70" stdDeviation="60" flood-color="#0f172a" flood-opacity="0.30"/>
+    </filter>
+  </defs>
+
+  <ellipse cx="3840" cy="2160" rx="3000" ry="1500" fill="url(#ambient)"/>
+
+  <g filter="url(#shadow)">
+    <circle cx="2500" cy="2160" r="940" fill="none" stroke="url(#leftLoop)" stroke-width="340" stroke-linecap="round"/>
+    <circle cx="5180" cy="2160" r="940" fill="none" stroke="url(#rightLoop)" stroke-width="340" stroke-linecap="round"/>
+
+    <rect x="2950" y="1720" width="1780" height="880" rx="440" fill="url(#core)"/>
+    <rect x="3020" y="1790" width="1640" height="740" rx="370" fill="none" stroke="url(#energy)" stroke-opacity="0.42" stroke-width="24"/>
+
+    <path fill-rule="evenodd" d="M3840 1600c-309 0-560 251-560 560s251 560 560 560 560-251 560-560-251-560-560-560zm0 250c171 0 310 139 310 310s-139 310-310 310-310-139-310-310 139-310 310-310z" fill="url(#energy)"/>
+    <path d="M4010 1940l320 220-320 220z" fill="#f8fafc"/>
+
+    <path d="M4580 1385l84 225h239l-194 143 74 226-203-144-204 144 75-226-195-143h240z" fill="#f8fafc" fill-opacity="0.90"/>
+    <circle cx="3010" cy="1450" r="72" fill="#38bdf8" fill-opacity="0.92"/>
+    <circle cx="4780" cy="3010" r="58" fill="#22c55e" fill-opacity="0.92"/>
+  </g>
+</svg>

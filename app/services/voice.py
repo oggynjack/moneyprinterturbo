@@ -3,7 +3,7 @@ import concurrent.futures
 import math
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Union
 from xml.sax.saxutils import unescape
 
@@ -51,6 +51,61 @@ _GEMINI_SUPPORTED_VOICES = [
 ]
 _GEMINI_SUPPORTED_VOICE_SET = set(_GEMINI_SUPPORTED_VOICES)
 _GEMINI_DEFAULT_VOICE = "zephyr"
+_LAST_TTS_ERROR = ""
+
+
+def _set_last_tts_error(message: str) -> None:
+    global _LAST_TTS_ERROR
+    _LAST_TTS_ERROR = (message or "").strip()
+
+
+def clear_last_tts_error() -> None:
+    _set_last_tts_error("")
+
+
+def get_last_tts_error() -> str:
+    return _LAST_TTS_ERROR
+
+
+def _extract_retry_seconds(raw_error: str) -> str:
+    raw_error = raw_error or ""
+
+    match = re.search(r"retry\s+in\s+([0-9]+(?:\.[0-9]+)?)s", raw_error, re.IGNORECASE)
+    if match:
+        return str(math.ceil(float(match.group(1))))
+
+    match = re.search(
+        r"retry_delay\s*\{[^}]*seconds\s*:\s*([0-9]+)",
+        raw_error,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if match:
+        return match.group(1)
+
+    return ""
+
+
+def _summarize_tts_error(provider: str, raw_error: str) -> str:
+    message = (raw_error or "").strip()
+    if not message:
+        return ""
+
+    lowered = message.lower()
+    if provider == "gemini":
+        if "quota" in lowered or "rate limit" in lowered or "429" in lowered:
+            retry_seconds = _extract_retry_seconds(message)
+            retry_hint = (
+                f" Retry after about {retry_seconds}s."
+                if retry_seconds
+                else ""
+            )
+            return (
+                "Gemini TTS quota exceeded for this API key/project."
+                f"{retry_hint} "
+                "Check limits and billing: https://ai.google.dev/gemini-api/docs/rate-limits"
+            )
+
+    return message
 
 
 def mktimestamp(time_unit: float) -> str:
@@ -1157,8 +1212,10 @@ def tts(
     voice_file: str,
     voice_volume: float = 1.0,
 ) -> Union[SubMaker, None]:
+    clear_last_tts_error()
+
     if is_azure_v2_voice(voice_name):
-        return azure_tts_v2(text, voice_name, voice_file)
+        sub_maker = azure_tts_v2(text, voice_name, voice_file)
     elif is_siliconflow_voice(voice_name):
         # 从voice_name中提取模型和声音
         # 格式: siliconflow:model:voice-Gender
@@ -1170,10 +1227,11 @@ def tts(
             voice = voice_with_gender.split("-")[0]
             # 构建完整的voice参数，格式为 "model:voice"
             full_voice = f"{model}:{voice}"
-            return siliconflow_tts(
+            sub_maker = siliconflow_tts(
                 text, model, full_voice, voice_rate, voice_file, voice_volume
             )
         else:
+            _set_last_tts_error(f"Invalid siliconflow voice name format: {voice_name}")
             logger.error(f"Invalid siliconflow voice name format: {voice_name}")
             return None
     elif is_gemini_voice(voice_name):
@@ -1189,11 +1247,25 @@ def tts(
                     f"unsupported Gemini voice '{voice}', fallback to '{_GEMINI_DEFAULT_VOICE}'"
                 )
                 voice = _GEMINI_DEFAULT_VOICE
-            return gemini_tts(text, voice, voice_rate, voice_file, voice_volume)
+            sub_maker = gemini_tts(text, voice, voice_rate, voice_file, voice_volume)
         else:
+            _set_last_tts_error(f"Invalid Gemini voice name format: {voice_name}")
             logger.error(f"Invalid gemini voice name format: {voice_name}")
             return None
-    return azure_tts_v1(text, voice_name, voice_rate, voice_file)
+    else:
+        sub_maker = azure_tts_v1(text, voice_name, voice_rate, voice_file)
+
+    if sub_maker is None and not get_last_tts_error():
+        provider = "azure"
+        if is_gemini_voice(voice_name):
+            provider = "gemini"
+        elif is_siliconflow_voice(voice_name):
+            provider = "siliconflow"
+        elif is_azure_v2_voice(voice_name):
+            provider = "azure-v2"
+        _set_last_tts_error(f"{provider} TTS failed to generate audio.")
+
+    return sub_maker
 
 
 def convert_rate_to_percent(rate: float) -> str:
@@ -1312,7 +1384,7 @@ def azure_tts_v1(
 
     # For single-chunk texts, use the original file directly.
     # For multi-chunk, write temp files then concatenate.
-    import tempfile, wave, os as _os
+    import tempfile, os as _os
 
     def _tts_chunk(chunk_text: str, out_file: str) -> SubMaker:
         ensure_file_path_exists(out_file)
@@ -1347,8 +1419,10 @@ def azure_tts_v1(
                 # Multi-chunk: generate each chunk separately then concatenate audio
                 tmp_dir = tempfile.mkdtemp()
                 chunk_files = []
-                merged_sm = edge_tts.SubMaker()
+                merged_sm = ensure_legacy_submaker_fields(edge_tts.SubMaker())
                 time_offset_ms = 0
+
+                import shutil
 
                 for idx, chunk_text in enumerate(chunks):
                     chunk_file = _os.path.join(tmp_dir, f"chunk_{idx}.mp3")
@@ -1365,24 +1439,49 @@ def azure_tts_v1(
                         break
 
                     chunk_files.append(chunk_file)
-                    # Shift cue offsets by accumulated duration and merge
-                    for cue in (sm_part.cues if hasattr(sm_part, 'cues') else []):
-                        try:
-                            shifted = type(cue)(start=cue.start + time_offset_ms * 10000,
-                                               end=cue.end + time_offset_ms * 10000,
-                                               text=cue.text)
-                            merged_sm.cues.append(shifted)
-                        except Exception:
-                            pass  # cue merging is best-effort
 
-                    # Estimate duration from file size (rough: 128kbps mp3)
-                    try:
-                        chunk_dur_ms = int(_os.path.getsize(chunk_file) / 16)
-                    except Exception:
-                        chunk_dur_ms = 3000
+                    cues_part = getattr(sm_part, "cues", []) or []
+                    if cues_part:
+                        chunk_dur_ms = max(
+                            int(cues_part[-1].end.total_seconds() * 1000), 1
+                        )
+                    else:
+                        # Fallback to decoded duration when provider doesn't return word boundaries.
+                        try:
+                            chunk_dur_ms = max(int(get_audio_duration(chunk_file) * 1000), 1)
+                        except Exception:
+                            chunk_dur_ms = 3000
+
+                    # Keep legacy offsets for robust subtitle fallback paths.
+                    merged_sm.subs.append(chunk_text.strip())
+                    merged_sm.offset.append(
+                        (
+                            int(time_offset_ms * 10000),
+                            int((time_offset_ms + chunk_dur_ms) * 10000),
+                        )
+                    )
+
+                    # Shift cue offsets by accumulated duration and merge (best-effort).
+                    cue_shift = timedelta(milliseconds=time_offset_ms)
+                    for cue in cues_part:
+                        try:
+                            cue_content = getattr(cue, "content", None)
+                            if cue_content is None:
+                                cue_content = getattr(cue, "text", "")
+                            merged_sm.cues.append(
+                                submaker.Cue(
+                                    start=cue.start + cue_shift,
+                                    end=cue.end + cue_shift,
+                                    content=cue_content,
+                                )
+                            )
+                        except Exception:
+                            pass
+
                     time_offset_ms += chunk_dur_ms
 
                 if len(chunk_files) != len(chunks):
+                    shutil.rmtree(tmp_dir, ignore_errors=True)
                     continue  # Some chunk failed — retry
 
                 # Concatenate all mp3 chunk files into voice_file
@@ -1392,11 +1491,30 @@ def azure_tts_v1(
                         with open(cf, "rb") as in_f:
                             out_f.write(in_f.read())
                 # Clean temp
-                import shutil
                 shutil.rmtree(tmp_dir, ignore_errors=True)
                 sub_maker = merged_sm
 
             if not sub_maker.get_srt():
+                legacy_subs = getattr(sub_maker, "subs", [])
+                legacy_offsets = getattr(sub_maker, "offset", [])
+                if legacy_subs and legacy_offsets:
+                    logger.warning(
+                        "sub_maker.get_srt() is empty, using legacy subtitle data fallback"
+                    )
+                    logger.info(f"completed, output file: {voice_file}")
+                    return ensure_legacy_submaker_fields(sub_maker)
+
+                audio_duration = get_audio_duration(voice_file)
+                if audio_duration > 0:
+                    logger.warning(
+                        "sub_maker.get_srt() is empty, building full-span legacy subtitle fallback"
+                    )
+                    sub_maker = ensure_legacy_submaker_fields(sub_maker)
+                    sub_maker.subs = [text]
+                    sub_maker.offset = [(0, int(audio_duration * 10000000))]
+                    logger.info(f"completed, output file: {voice_file}")
+                    return sub_maker
+
                 logger.warning("failed, sub_maker.get_srt() is empty")
                 continue
 
@@ -1668,6 +1786,7 @@ def gemini_tts(
         api_key = config.app.get("gemini_api_key", "")
         if not api_key:
             logger.error("Gemini API key is not set")
+            _set_last_tts_error("Gemini API key is not set in config.toml.")
             return None
             
         genai.configure(api_key=api_key)
@@ -1696,6 +1815,7 @@ def gemini_tts(
         # 检查响应
         if not response.candidates or not response.candidates[0].content:
             logger.error("No audio content received from Gemini TTS")
+            _set_last_tts_error("Gemini TTS returned no audio content.")
             return None
             
         # 获取音频数据
@@ -1709,6 +1829,7 @@ def gemini_tts(
                 
         if not audio_data:
             logger.error("No audio data found in response")
+            _set_last_tts_error("Gemini TTS returned empty audio data.")
             return None
             
         # 音频数据已经是原始字节，不需要base64解码
@@ -1800,12 +1921,18 @@ def gemini_tts(
             logger.error(
                 "ffmpeg executable not found. Set app.ffmpeg_path in config.toml or add ffmpeg to PATH."
             )
+            _set_last_tts_error(
+                "ffmpeg executable not found. Set app.ffmpeg_path in config.toml or add ffmpeg to PATH."
+            )
             return None
         except subprocess.CalledProcessError as e:
-            logger.error(f"ffmpeg convert failed: {e.stderr.decode(errors='ignore').strip()}")
+            convert_error = e.stderr.decode(errors='ignore').strip()
+            logger.error(f"ffmpeg convert failed: {convert_error}")
+            _set_last_tts_error(f"Audio convert failed: {convert_error}")
             return None
         except Exception as e:
             logger.error(f"Failed to process Gemini audio bytes: {e}")
+            _set_last_tts_error(f"Failed to process Gemini audio bytes: {e}")
             return None
         finally:
             if tmp_wav and os.path.exists(tmp_wav):
@@ -1831,6 +1958,8 @@ def gemini_tts(
         return sub_maker
         
     except Exception as e:
+        summarized = _summarize_tts_error("gemini", str(e))
+        _set_last_tts_error(summarized)
         logger.error(f"Gemini TTS failed, error: {str(e)}")
         return None
 
@@ -2021,6 +2150,49 @@ def _build_subtitle_items_from_legacy_submaker(
         logger.warning(
             f"legacy subtitle items still have unmatched text after aggregation: {sub_line}"
         )
+
+    # When legacy aggregation cannot produce a full line-by-line match,
+    # fall back to approximate timings across the total audio span. This keeps
+    # subtitle text correct and avoids unnecessary Whisper fallback.
+    if (
+        script_lines
+        and legacy_offsets
+        and legacy_subs
+        and len(sub_items) != len(script_lines)
+    ):
+        start_time = int(min(offset[0] for offset in legacy_offsets))
+        end_time = int(max(offset[1] for offset in legacy_offsets))
+        total_duration = max(end_time - start_time, 0)
+        if total_duration > 0:
+            logger.warning(
+                "legacy subtitle fallback activated: rebuilding line timings by script length "
+                f"(matched={len(sub_items)}, expected={len(script_lines)})"
+            )
+
+            sub_items = []
+            weights = []
+            for line in script_lines:
+                normalized = re.sub(r"\s+", "", line or "")
+                weights.append(max(len(normalized), 1))
+
+            total_weight = sum(weights)
+            cursor = start_time
+            for idx, (line, weight) in enumerate(zip(script_lines, weights), start=1):
+                if idx == len(script_lines):
+                    line_end = end_time
+                else:
+                    span = int(total_duration * (weight / total_weight))
+                    line_end = min(end_time, cursor + max(span, 1))
+
+                sub_items.append(
+                    formatter(
+                        idx=idx,
+                        start_time=cursor,
+                        end_time=line_end,
+                        sub_text=line.strip(),
+                    )
+                )
+                cursor = line_end
 
     return sub_items
 

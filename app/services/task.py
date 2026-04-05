@@ -8,9 +8,29 @@ from loguru import logger
 from app.config import config
 from app.models import const
 from app.models.schema import VideoConcatMode, VideoParams
-from app.services import llm, material, subtitle, video, voice, upload_post
+from app.services import llm, material, subtitle, video, voice, upload_post, youtube_upload
 from app.services import state as sm
 from app.utils import utils
+
+
+def _is_stop_requested(task_id: str) -> bool:
+    task_info = sm.state.get_task(task_id) or {}
+    return bool(task_info.get("stop_requested", False))
+
+
+def _stop_if_requested(task_id: str, progress: int = 0) -> bool:
+    if not _is_stop_requested(task_id):
+        return False
+
+    sm.state.update_task(
+        task_id,
+        state=const.TASK_STATE_FAILED,
+        progress=progress,
+        error="Task stopped by user.",
+        stop_requested=True,
+    )
+    logger.warning(f"task {task_id} stopped by user")
+    return True
 
 
 def generate_script(task_id, params):
@@ -104,13 +124,21 @@ def generate_audio(task_id, params, video_script):
             voice_file=audio_file,
         )
         if sub_maker is None:
-            sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
-            logger.error(
-                """failed to generate audio:
+            tts_error = voice.get_last_tts_error()
+            sm.state.update_task(
+                task_id,
+                state=const.TASK_STATE_FAILED,
+                error=tts_error,
+            )
+            if tts_error:
+                logger.error(f"failed to generate audio: {tts_error}")
+            else:
+                logger.error(
+                    """failed to generate audio:
 1. check if the language of the voice matches the language of the video script.
 2. check if the network is available. If you are in China, it is recommended to use a VPN and enable the global traffic mode.
             """.strip()
-            )
+                )
             return None, None, None
         audio_duration = math.ceil(voice.get_audio_duration(sub_maker))
         if audio_duration == 0:
@@ -169,6 +197,9 @@ def generate_subtitle(task_id, params, video_script, sub_maker, audio_file):
 
 
 def get_video_materials(task_id, params, video_terms, audio_duration):
+    if _stop_if_requested(task_id, progress=40):
+        return None
+
     if params.video_source == "local":
         logger.info("\n\n## preprocess local materials")
         materials = video.preprocess_video(
@@ -191,8 +222,11 @@ def get_video_materials(task_id, params, video_terms, audio_duration):
             video_contact_mode=params.video_concat_mode,
             audio_duration=audio_duration * params.video_count,
             max_clip_duration=params.video_clip_duration,
+            should_stop=lambda: _is_stop_requested(task_id),
         )
         if not downloaded_videos:
+            if _stop_if_requested(task_id, progress=50):
+                return None
             sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
             logger.error(
                 "failed to download videos, maybe the network is not available. if you are in China, please use a VPN."
@@ -213,6 +247,9 @@ def generate_final_videos(
 
     _progress = 50
     for i in range(params.video_count):
+        if _stop_if_requested(task_id, progress=_progress):
+            return [], []
+
         index = i + 1
         combined_video_path = path.join(
             utils.task_dir(task_id), f"combined-{index}.mp4"
@@ -231,6 +268,9 @@ def generate_final_videos(
 
         _progress += 50 / params.video_count / 2
         sm.state.update_task(task_id, progress=_progress)
+
+        if _stop_if_requested(task_id, progress=_progress):
+            return [], []
 
         final_video_path = path.join(utils.task_dir(task_id), f"final-{index}.mp4")
 
@@ -254,12 +294,23 @@ def generate_final_videos(
 
 def start(task_id, params: VideoParams, stop_at: str = "video"):
     logger.info(f"start task: {task_id}, stop_at: {stop_at}")
-    sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=5)
+    sm.state.update_task(
+        task_id,
+        state=const.TASK_STATE_PROCESSING,
+        progress=5,
+        stop_requested=False,
+    )
+
+    if _stop_if_requested(task_id, progress=5):
+        return
 
     # 1. Generate script
     video_script = generate_script(task_id, params)
     if not video_script or "Error: " in video_script:
         sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
+        return
+
+    if _stop_if_requested(task_id, progress=10):
         return
 
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=10)
@@ -277,6 +328,9 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
         if not video_terms:
             sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
             return
+
+    if _stop_if_requested(task_id, progress=15):
+        return
 
     save_script_data(task_id, video_script, video_terms, params)
 
@@ -296,6 +350,9 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
         sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
         return
 
+    if _stop_if_requested(task_id, progress=30):
+        return
+
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=30)
 
     if stop_at == "audio":
@@ -311,6 +368,9 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
     subtitle_path = generate_subtitle(
         task_id, params, video_script, sub_maker, audio_file
     )
+
+    if _stop_if_requested(task_id, progress=35):
+        return
 
     if stop_at == "subtitle":
         sm.state.update_task(
@@ -328,6 +388,8 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
         task_id, params, video_terms, audio_duration
     )
     if not downloaded_videos:
+        if _is_stop_requested(task_id):
+            return
         sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
         return
 
@@ -375,6 +437,40 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
             else:
                 logger.warning(f"⚠️ Failed to cross-post: {video_path} - {result.get('error', 'Unknown error')}")
 
+    # 8. Upload to YouTube (if enabled)
+    youtube_upload_results = []
+    youtube_auto_upload = bool(getattr(params, "youtube_auto_upload", False))
+    if not youtube_auto_upload:
+        youtube_auto_upload = youtube_upload.youtube_upload_service.should_auto_upload()
+
+    if youtube_auto_upload:
+        logger.info("\n\n## uploading videos to YouTube")
+
+        base_title = (params.video_subject or "0Code AutoGen Video").strip()
+        description = str(getattr(params, "youtube_description", "") or "").strip()
+        if not description:
+            description = str(config.app.get("youtube_default_description", "") or "").strip()
+        if not description:
+            description = (video_script or "").strip()[:4000]
+
+        publish_mode = str(getattr(params, "youtube_publish_mode", "auto") or "auto").strip().lower()
+
+        for index, video_path in enumerate(final_video_paths, start=1):
+            title = base_title if len(final_video_paths) == 1 else f"{base_title} #{index}"
+            result = youtube_upload.upload_to_youtube(
+                video_path=video_path,
+                title=title,
+                description=description,
+                publish_mode=publish_mode,
+            )
+            youtube_upload_results.append(result)
+            if result.get("success"):
+                logger.info(f"✅ Uploaded to YouTube: {video_path} => {result.get('url', '')}")
+            else:
+                logger.warning(
+                    f"⚠️ Failed to upload to YouTube: {video_path} - {result.get('error', 'Unknown error')}"
+                )
+
     kwargs = {
         "videos": final_video_paths,
         "combined_videos": combined_video_paths,
@@ -385,6 +481,7 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
         "subtitle_path": subtitle_path,
         "materials": downloaded_videos,
         "cross_post_results": cross_post_results if cross_post_results else None,
+        "youtube_upload_results": youtube_upload_results if youtube_upload_results else None,
     }
     sm.state.update_task(
         task_id, state=const.TASK_STATE_COMPLETE, progress=100, **kwargs

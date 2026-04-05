@@ -1,6 +1,6 @@
-# moneyprinterturbo Test Directory
+# 0Code AutoGen Test Directory
 
-This directory contains unit tests for the **moneyprinterturbo** project.
+This directory contains unit tests for the **0Code AutoGen** project.
 
 ## Directory Structure
 

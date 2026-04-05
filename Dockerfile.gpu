@@ -5,10 +5,10 @@ FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Set the working directory in the container
-WORKDIR /moneyprinterturbo
-RUN chmod 777 /moneyprinterturbo
+WORKDIR /0code-autogen
+RUN chmod 777 /0code-autogen
 
-ENV PYTHONPATH="/moneyprinterturbo"
+ENV PYTHONPATH="/0code-autogen"
 
 # Install Python 3.11 and system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \

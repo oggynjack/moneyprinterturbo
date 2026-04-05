@@ -1,19 +1,296 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <title>moneyprinterturbo</title>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>0Code AutoGen | AI Video Automation</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet" />
+    <style>
+        :root {
+            --bg: #f4f7fb;
+            --surface: #ffffff;
+            --ink: #0f172a;
+            --muted: #475569;
+            --primary: #0ea5e9;
+            --accent: #22c55e;
+            --warm: #f59e0b;
+            --ring: rgba(14, 165, 233, 0.3);
+            --card-border: rgba(15, 23, 42, 0.08);
+            --shadow: 0 18px 50px rgba(15, 23, 42, 0.12);
+        }
+
+        * { box-sizing: border-box; }
+
+        body {
+            margin: 0;
+            font-family: "IBM Plex Sans", "Segoe UI", Arial, sans-serif;
+            color: var(--ink);
+            background:
+                radial-gradient(circle at 12% 10%, rgba(34, 197, 94, 0.18) 0, rgba(34, 197, 94, 0) 35%),
+                radial-gradient(circle at 88% 20%, rgba(245, 158, 11, 0.2) 0, rgba(245, 158, 11, 0) 36%),
+                linear-gradient(160deg, #f8fbff 0%, var(--bg) 44%, #eef3ff 100%);
+            min-height: 100vh;
+        }
+
+        .page {
+            width: min(1160px, 92vw);
+            margin: 0 auto;
+            padding: 30px 0 42px;
+        }
+
+        .hero {
+            background: linear-gradient(145deg, rgba(255,255,255,0.94), rgba(255,255,255,0.78));
+            border: 1px solid var(--card-border);
+            border-radius: 28px;
+            box-shadow: var(--shadow);
+            overflow: hidden;
+            position: relative;
+            animation: fadeIn 500ms ease-out;
+        }
+
+        .hero::before {
+            content: "";
+            position: absolute;
+            inset: 0;
+            background: linear-gradient(90deg, rgba(14,165,233,0.07), rgba(34,197,94,0.06), rgba(245,158,11,0.08));
+            pointer-events: none;
+        }
+
+        .hero-content {
+            position: relative;
+            z-index: 1;
+            padding: 34px;
+            display: grid;
+            gap: 20px;
+        }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            flex-wrap: wrap;
+        }
+
+        .brand img {
+            width: min(600px, 100%);
+            height: auto;
+        }
+
+        .tag {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            border: 1px solid rgba(15, 23, 42, 0.12);
+            padding: 8px 12px;
+            border-radius: 999px;
+            font-size: 13px;
+            color: var(--muted);
+            background: rgba(255, 255, 255, 0.7);
+        }
+
+        h1 {
+            margin: 0;
+            font-family: "Space Grotesk", "Segoe UI", Arial, sans-serif;
+            font-size: clamp(28px, 4vw, 48px);
+            line-height: 1.12;
+        }
+
+        .sub {
+            margin: 0;
+            max-width: 860px;
+            font-size: clamp(15px, 2vw, 19px);
+            color: #334155;
+        }
+
+        .actions {
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+
+        .btn {
+            appearance: none;
+            border: none;
+            text-decoration: none;
+            font-weight: 600;
+            letter-spacing: 0.2px;
+            border-radius: 12px;
+            padding: 12px 18px;
+            transition: transform 120ms ease, box-shadow 120ms ease;
+        }
+
+        .btn:hover {
+            transform: translateY(-1px);
+        }
+
+        .btn-primary {
+            background: linear-gradient(110deg, var(--primary), #2563eb);
+            color: #fff;
+            box-shadow: 0 8px 24px rgba(37, 99, 235, 0.28);
+        }
+
+        .btn-secondary {
+            background: #fff;
+            color: #0f172a;
+            border: 1px solid rgba(15, 23, 42, 0.14);
+        }
+
+        .stats {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 12px;
+            margin-top: 6px;
+        }
+
+        .stat {
+            background: #fff;
+            border: 1px solid var(--card-border);
+            border-radius: 14px;
+            padding: 12px;
+        }
+
+        .stat strong {
+            display: block;
+            font-family: "Space Grotesk", "Segoe UI", Arial, sans-serif;
+            font-size: 22px;
+            color: #0b4a6f;
+        }
+
+        .stat span {
+            color: var(--muted);
+            font-size: 13px;
+        }
+
+        .grid {
+            margin-top: 18px;
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 12px;
+        }
+
+        .card {
+            background: var(--surface);
+            border: 1px solid var(--card-border);
+            border-radius: 16px;
+            padding: 16px;
+            box-shadow: 0 8px 24px rgba(15, 23, 42, 0.05);
+            animation: fadeIn 620ms ease-out;
+        }
+
+        .card h3 {
+            margin: 0 0 8px;
+            font-size: 17px;
+            font-family: "Space Grotesk", "Segoe UI", Arial, sans-serif;
+        }
+
+        .card p {
+            margin: 0;
+            color: var(--muted);
+            line-height: 1.5;
+            font-size: 14px;
+        }
+
+        .footer {
+            margin-top: 18px;
+            display: flex;
+            justify-content: space-between;
+            gap: 12px;
+            align-items: center;
+            flex-wrap: wrap;
+            color: var(--muted);
+            font-size: 13px;
+        }
+
+        .footer a {
+            color: #0b4a6f;
+            text-decoration: none;
+            border-bottom: 1px dashed rgba(11, 74, 111, 0.35);
+        }
+
+        .footer a:hover {
+            color: #0369a1;
+            border-bottom-color: rgba(3, 105, 161, 0.4);
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(5px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        @media (max-width: 900px) {
+            .stats,
+            .grid {
+                grid-template-columns: 1fr;
+            }
+
+            .hero-content {
+                padding: 24px;
+            }
+        }
+    </style>
 </head>
 <body>
-<h1>moneyprinterturbo</h1>
-<a href="https://github.com/harry0703/moneyprinterturbo">https://github.com/harry0703/moneyprinterturbo</a>
-<p>
-    只需提供一个视频 主题 或 关键词 ，就可以全自动生成视频文案、视频素材、视频字幕、视频背景音乐，然后合成一个高清的短视频。
-</p>
+    <main class="page">
+        <section class="hero">
+            <div class="hero-content">
+                <div class="brand">
+                    <img src="/0code-autogen-logo.svg" alt="0Code AutoGen" />
+                </div>
 
-<p>
-    Simply provide a topic or keyword for a video, and it will automatically generate the video copy, video materials,
-    video subtitles, and video background music before synthesizing a high-definition short video.
-</p>
+                <span class="tag">AI-first video pipeline with social publishing automation</span>
+
+                <h1>Turn a topic into a ready-to-publish short video in one flow.</h1>
+                <p class="sub">
+                    0Code AutoGen creates script, voice, subtitles, visuals, and final rendering,
+                    then can publish automatically to YouTube, TikTok, and Instagram.
+                </p>
+
+                <div class="actions">
+                    <a class="btn btn-primary" href="http://127.0.0.1:8501">Open WebUI</a>
+                    <a class="btn btn-secondary" href="/docs">Open API Docs</a>
+                    <a class="btn btn-secondary" href="https://github.com/harry0703/0code-autogen" target="_blank" rel="noopener noreferrer">GitHub Repository</a>
+                </div>
+
+                <div class="stats">
+                    <div class="stat">
+                        <strong>1 Prompt</strong>
+                        <span>Topic to production-ready video</span>
+                    </div>
+                    <div class="stat">
+                        <strong>Auto Upload</strong>
+                        <span>YouTube + Upload-Post platforms</span>
+                    </div>
+                    <div class="stat">
+                        <strong>API + UI</strong>
+                        <span>Automation-friendly and human-friendly</span>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section class="grid">
+            <article class="card">
+                <h3>Video Generation</h3>
+                <p>Generate script, voiceover, subtitles, and composite video from a single input topic or custom script.</p>
+            </article>
+            <article class="card">
+                <h3>YouTube OAuth Upload</h3>
+                <p>Authorize with Google once in WebUI, then upload as Shorts, regular videos, or smart auto mode.</p>
+            </article>
+            <article class="card">
+                <h3>Cross-Posting</h3>
+                <p>Publish to TikTok and Instagram via Upload-Post with centralized API key and platform settings.</p>
+            </article>
+        </section>
+
+        <footer class="footer">
+            <span>0Code AutoGen</span>
+            <span>
+                Learn more in <a href="/docs">API documentation</a> and <a href="https://github.com/harry0703/0code-autogen" target="_blank" rel="noopener noreferrer">project repository</a>.
+            </span>
+        </footer>
+    </main>
 </body>
 </html>
